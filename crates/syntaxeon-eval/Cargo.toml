@@ -1,0 +1,24 @@
+[package]
+name = "syntaxeon-eval"
+description = "Tree-walking evaluator over the canonical AST (spec/SEMANTIC_CORE.md §6)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+syntaxeon-core.workspace = true
+
+[dev-dependencies]
+syntaxeon-check.workspace = true
+syntaxeon-lex.workspace = true
+syntaxeon-syntax.workspace = true
+
+[lints]
+workspace = true

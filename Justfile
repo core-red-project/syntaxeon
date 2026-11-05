@@ -1,0 +1,70 @@
+# Task runner configuration
+
+set windows-shell := ["bash", "-cu"]
+
+default:
+    @just --list
+
+# Bootstrap toolchain components and install the git hooks
+install:
+    rustup component add rustfmt clippy
+    cargo fetch --locked
+    git config core.hooksPath .githooks
+
+# Explain a bundled example: end-word tails, rhyme groups and verdict
+dev:
+    cargo run -p syntaxeon-cli -- explain examples/hello.sxe
+
+# Produce build artifacts for all workspace crates
+build:
+    cargo build --workspace --locked
+
+# Run complete test suite across all workspace crates
+test:
+    cargo test --workspace --locked
+
+# Run correctness and type checking
+typecheck:
+    cargo check --workspace --all-targets --locked
+
+# Run static analysis and linting
+lint:
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+
+# Audit dependencies: advisories, licenses, sources.
+# DENY_OFFLINE=1 reuses the cached advisory database instead of fetching it.
+deny:
+    @command -v cargo-deny >/dev/null || { echo "cargo-deny is missing: cargo install cargo-deny --locked" >&2; exit 1; }
+    cargo deny check {{ if env("DENY_OFFLINE", "") != "" { "--disable-fetch" } else { "" } }}
+
+# Apply automatic formatting
+format:
+    cargo fmt --all
+
+# Verify formatting without modifying files
+format-check:
+    cargo fmt --all --check
+
+# Run the complete quality gate (non-mutating)
+check: format-check lint typecheck test deny
+
+# Remove build artifacts and caches
+clean:
+    cargo clean
+
+# Startup, check and run timings on the committed fixture; not part of `check` (timing is noisy)
+bench:
+    @command -v hyperfine >/dev/null || { echo "hyperfine is missing: cargo install hyperfine --locked" >&2; exit 1; }
+    cargo build --release --locked -p syntaxeon-cli
+    hyperfine --warmup 3 'target/release/syntaxeon --version' 'target/release/syntaxeon check benches/fixture.sxe' 'target/release/syntaxeon run benches/fixture.sxe'
+
+# Archive the release build for TARGET and VERSION into dist/ (asset names: docs/RELEASING.md)
+package:
+    bash scripts/package.sh
+
+# Write RELEASE_NOTES.md for VERSION from Conventional Commits
+changelog:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${VERSION:?set VERSION, e.g. 1.2.3}"
+    git cliff --latest --strip all -o RELEASE_NOTES.md

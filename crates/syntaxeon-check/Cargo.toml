@@ -1,0 +1,23 @@
+[package]
+name = "syntaxeon-check"
+description = "Name resolution and static type checking (spec/SEMANTIC_CORE.md §5, §9)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+syntaxeon-core.workspace = true
+syntaxeon-lex.workspace = true
+
+[dev-dependencies]
+syntaxeon-syntax.workspace = true
+
+[lints]
+workspace = true

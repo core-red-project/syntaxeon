@@ -1,0 +1,37 @@
+# One line ending everywhere: LF in the repository and in every checkout
+* text=auto eol=lf
+
+# Syntaxeon source files
+*.sxe text eol=lf linguist-detectable linguist-documentation=false
+
+# Rust source code
+*.rs text eol=lf diff=rust
+
+# Configuration and manifests
+*.toml text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Documentation and text
+*.md text eol=lf
+LICENSE text eol=lf
+
+# Scripts and task runners
+*.sh text eol=lf
+Justfile text eol=lf
+
+# The pinned pronunciation lexicon is verified by sha256: its bytes must never be rewritten
+*.dict -text -diff linguist-generated
+
+# Lockfiles are generated
+*.lock text eol=lf linguist-generated
+Cargo.lock -diff
+
+# Binary media assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
