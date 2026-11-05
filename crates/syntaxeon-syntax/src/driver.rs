@@ -2,7 +2,7 @@
 
 use syntaxeon_core::{Expr, Program, Stanza, Stmt, StmtKind, Type};
 use syntaxeon_lex::Diagnostic;
-use syntaxeon_lex::lexer::{Lexed, Tok};
+use syntaxeon_lex::lexer::{Lexed, Tok, lex};
 use syntaxeon_lex::literary::Stanza as Verses;
 
 use crate::grammar::{Open, P};
@@ -291,15 +291,16 @@ fn simple_statement(s: &Sentence, diags: &mut Vec<Diagnostic>) -> Option<StmtKin
                     }
                 })
                 .collect();
-            let ops = words
+            let infix = words
                 .iter()
-                .filter(|w| matches!(**w, "plus" | "minus" | "times" | "over" | "modulo" | "is"))
+                .filter(|w| matches!(**w, "plus" | "minus" | "times" | "over" | "modulo"))
                 .count();
-            let prefix = words.iter().any(|w| matches!(*w, "both" | "either"));
-            if ops >= 2 && !prefix {
+            let compares = words.iter().filter(|w| **w == "is").count();
+            let logic = words.iter().any(|w| matches!(*w, "both" | "either"));
+            if infix >= 1 || (compares >= 2 && !logic) {
                 diags.push(diag(
                     "SXP-106",
-                    "chained infix operators; nest with prefix forms ('the sum of … and …')",
+                    "an infix word is where the grammar does not allow one: infix words take two plain operands, never chain, and never appear inside 'the sum of … and …'; nest with a prefix form",
                     s.line,
                 ));
             } else {
@@ -321,12 +322,60 @@ fn simple_statement(s: &Sentence, diags: &mut Vec<Diagnostic>) -> Option<StmtKin
             }
         }
         n => {
-            diags.push(diag(
-                "SXP-104",
-                &format!("ambiguous sentence: {n} distinct readings"),
-                s.line,
-            ));
+            let message = ambiguity_message(n, &parses);
+            diags.push(diag("SXP-104", &message, s.line));
             None
         }
+    }
+}
+
+/// All distinct readings of one simple sentence given with its terminator, for tooling and
+/// tests: none is `SXP-103`, more than one is `SXP-104`. Blocks and headers are not sentences
+/// in this sense.
+#[must_use]
+pub fn statement_readings(sentence: &str) -> Vec<StmtKind> {
+    let lexed = lex(sentence);
+    let toks: Vec<Tok> = lexed.tokens.iter().map(|t| t.tok.clone()).collect();
+    match toks.split_last() {
+        Some((Tok::Punct('.' | '!' | '?'), body)) => dedup(P { t: body }.statement()),
+        _ => vec![],
+    }
+}
+
+/// The `SXP-104` text: how many readings, the first three, and what to do.
+fn ambiguity_message(n: usize, readings: &[StmtKind]) -> String {
+    let shown: Vec<String> = readings
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, r)| {
+            let text = format!("{r:?}");
+            let cut = text
+                .char_indices()
+                .nth(110)
+                .map_or(text.len(), |(at, _)| at);
+            let dots = if cut < text.len() { "…" } else { "" };
+            format!("[{}] {}{dots}", i + 1, &text[..cut])
+        })
+        .collect();
+    format!(
+        "ambiguous sentence: {n} distinct readings: {}; bind a value with 'Let' first, or nest with a prefix form",
+        shown.join(" ")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use syntaxeon_core::Expr;
+
+    use super::*;
+
+    #[test]
+    fn the_ambiguity_message_lists_the_readings() {
+        let a = StmtKind::Return(Some(Expr::Int(1)));
+        let b = StmtKind::Return(None);
+        let m = ambiguity_message(2, &[a, b]);
+        assert!(m.starts_with("ambiguous sentence: 2 distinct readings: [1] Return(Some(Int(1)))"));
+        assert!(m.contains("[2] Return(None)") && m.contains("bind a value"));
     }
 }

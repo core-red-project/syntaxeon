@@ -11,6 +11,7 @@ mod args;
 mod help;
 mod pipeline;
 mod render;
+mod rhymes;
 mod style;
 
 use std::io::{Read, Write};
@@ -71,6 +72,7 @@ pub fn run(
             let _ = write!(out, "{}", help::man());
             0
         }
+        Cmd::Rhymes(word) => rhymes::run(&word, opts, out, err),
         Cmd::Completions(shell) => {
             if let Some(script) = help::completions(&shell) {
                 let _ = write!(out, "{script}");

@@ -7,6 +7,10 @@ pub struct Opts {
     pub verbose: bool,
     pub json: bool,
     pub no_color: bool,
+    /// `rhymes`: also list words that do not look like common ones.
+    pub all: bool,
+    /// `rhymes`: how many words to show; `0` means no limit.
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -17,14 +21,17 @@ pub enum Cmd {
     Explain(String),
     Ast(String),
     Run(String),
+    Rhymes(String),
     Completions(String),
     Man,
 }
 
-pub const COMMANDS: [&str; 7] = [
+pub const COMMANDS: [&str; 9] = [
     "check",
     "explain",
     "ast",
+    "run",
+    "rhymes",
     "completions",
     "help",
     "version",
@@ -59,11 +66,17 @@ fn suggest(word: &str) -> Option<&'static str> {
         .min_by_key(|c| distance(word, c))
 }
 
+fn parse_limit(n: &str) -> Result<usize, Usage> {
+    n.parse()
+        .map_err(|_| Usage(format!("'--limit' needs a whole number, got '{n}'")))
+}
+
 pub fn parse(args: &[String]) -> Result<(Opts, Cmd), Usage> {
     let mut opts = Opts::default();
     let mut positional: Vec<&str> = Vec::new();
     let (mut help, mut version) = (false, false);
-    for a in args {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => help = true,
             "-V" | "--version" => version = true,
@@ -71,6 +84,14 @@ pub fn parse(args: &[String]) -> Result<(Opts, Cmd), Usage> {
             "-v" | "--verbose" => opts.verbose = true,
             "--json" => opts.json = true,
             "--no-color" => opts.no_color = true,
+            "--all" => opts.all = true,
+            "--limit" => {
+                let n = it
+                    .next()
+                    .ok_or_else(|| Usage("'--limit' needs a number".to_string()))?;
+                opts.limit = Some(parse_limit(n)?);
+            }
+            f if f.starts_with("--limit=") => opts.limit = Some(parse_limit(&f[8..])?),
             f if f.starts_with('-') && f != "-" => {
                 return Err(Usage(format!("unknown option '{f}'")));
             }
@@ -98,6 +119,7 @@ pub fn parse(args: &[String]) -> Result<(Opts, Cmd), Usage> {
         "check" => Cmd::Check(one(rest, "a file (or '-' for stdin)")?),
         "explain" => Cmd::Explain(one(rest, "a file (or '-' for stdin)")?),
         "run" => Cmd::Run(one(rest, "a file")?),
+        "rhymes" => Cmd::Rhymes(one(rest, "a word")?),
         "ast" => Cmd::Ast(one(rest, "a file (or '-' for stdin)")?),
         "completions" => Cmd::Completions(one(rest, "a shell")?),
         other => {

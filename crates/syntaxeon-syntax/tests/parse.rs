@@ -15,8 +15,9 @@ fn parse(src: &str) -> (Program, Vec<&'static str>) {
 /// Body of a program whose entry stanza contains `lines`; asserts there are no diagnostics.
 fn body(lines: &str) -> Vec<StmtKind> {
     let (p, codes) = parse(&format!("Thus begins the tale:\n{lines}\n"));
-    assert!(
-        codes.is_empty(),
+    assert_eq!(
+        codes.len(),
+        0,
         "unexpected diagnostics {codes:?} for {lines:?}"
     );
     p.stanzas[0].body.iter().map(|s| s.kind.clone()).collect()
@@ -55,7 +56,7 @@ fn worked_example_from_the_grammar() {
         To double, taking the number as whole number, giving whole number:\n\
         Give back the product of the number and two.\n";
     let (p, c) = parse(src);
-    assert!(c.is_empty(), "{c:?}");
+    assert_eq!(c.len(), 0, "{c:?}");
     assert_eq!(p.stanzas.len(), 2);
     let e = &p.stanzas[0];
     assert_eq!(e.title, "counting");
@@ -223,13 +224,79 @@ fn block_errors_are_107() {
 }
 
 #[test]
-fn ambiguity_is_104_not_a_silent_pick() {
-    // item (a of b) of c  vs  item a of (b of c)
-    assert_eq!(codes("Let x be item i of xs of ys."), ["SXP-104"]);
-    // call with `x with y appended` as argument vs append(call, y)
+fn a_comma_goes_to_the_innermost_open_call_or_list() {
+    // `g` takes both arguments; `f` takes one.
     assert_eq!(
-        codes("Let z be calling f with x with y appended."),
-        ["SXP-104"]
+        body("Let z be calling f with calling g with 1, 2.")[0],
+        decl(
+            "z",
+            None,
+            false,
+            call("f", vec![call("g", vec![Expr::Int(1), Expr::Int(2)])])
+        )
+    );
+    // A list literal in an argument list takes the rest of the list.
+    assert_eq!(
+        body("Call f with a list of 1, 2.")[0],
+        StmtKind::Expr(call(
+            "f",
+            vec![Expr::List(vec![Expr::Int(1), Expr::Int(2)])]
+        ))
+    );
+}
+
+#[test]
+fn an_open_construct_swallows_a_following_infix_word() {
+    // gcd(71 plus 12), not (gcd 71) plus 12.
+    assert_eq!(
+        body("Give back calling gcd with 71 plus 12.")[0],
+        StmtKind::Return(Some(call(
+            "gcd",
+            vec![bin(BinOp::Add, Expr::Int(71), Expr::Int(12))]
+        )))
+    );
+    // `calling f with x with y appended` is f(x with y appended).
+    assert_eq!(
+        body("Let z be calling f with x with y appended.")[0],
+        decl(
+            "z",
+            None,
+            false,
+            call("f", vec![call("append", vec![v("x"), v("y")])])
+        )
+    );
+}
+
+#[test]
+fn prefix_forms_hold_plain_operands() {
+    // The infix word ends the prefix form: (the sum of 1 and 2) plus 3.
+    assert_eq!(
+        body("Speak the sum of 1 and 2 plus 3.")[0],
+        StmtKind::Expr(call(
+            "speak",
+            vec![bin(
+                BinOp::Add,
+                bin(BinOp::Add, Expr::Int(1), Expr::Int(2)),
+                Expr::Int(3)
+            )]
+        ))
+    );
+    // An infix word inside one is refused with the infix code, not guessed.
+    assert_eq!(codes("Speak the sum of 1 plus 2 and 3."), ["SXP-106"]);
+}
+
+#[test]
+fn variable_names_cannot_contain_of() {
+    assert_eq!(codes("Let the tale of men be 1."), ["SXP-103"]);
+    // `item … of …` therefore reads one way only.
+    assert_eq!(
+        body("Let x be item i of xs.")[0],
+        decl(
+            "x",
+            None,
+            false,
+            Expr::Index(Box::new(v("xs")), Box::new(v("i")))
+        )
     );
 }
 
@@ -251,7 +318,7 @@ fn headers() {
         "Thus begins alpha:\nSpeak \"a\".\n\n\
          To add, taking x as whole number, y as whole number, and z as fraction, giving fraction:\nGive back z.\n",
     );
-    assert!(c.is_empty(), "{c:?}");
+    assert_eq!(c.len(), 0, "{c:?}");
     assert_eq!(p.stanzas[1].params.len(), 3);
     assert_eq!(p.stanzas[1].params[2].ty, Type::Float);
     let (p, _) = parse(

@@ -51,7 +51,7 @@ fn stanza_vectors() {
 
 #[test]
 fn scheme_shapes() {
-    assert!(schemes(1).is_empty());
+    assert_eq!(schemes(1).len(), 0);
     assert_eq!(schemes(3), vec![vec![0, 0, 0]]);
     assert_eq!(schemes(5), vec![vec![0, 0, 1, 1, 1]]);
     assert_eq!(schemes(4).len(), 3);
@@ -96,4 +96,43 @@ fn pin_detects_tampering() {
 fn dictionary_comments_are_ignored() {
     let l = Lexicon::parse("aalto AA1 L T OW2 # name, finnish\n").unwrap();
     assert!(l.lookup("aalto").is_some());
+}
+
+#[test]
+fn rhymes_with_lists_partners_and_excludes_the_word_itself() {
+    use syntaxeon_lexicon::rhyme::rhymes_with;
+    let l = lex();
+    let then = rhymes_with(&l, "then").unwrap();
+    assert!(then.contains(&"men") && then.contains(&"ten") && then.contains(&"again"));
+    assert!(!then.contains(&"then"), "a word is not its own rhyme");
+    // Same onset means identical rhyme, so homophones of the onset are excluded.
+    let night = rhymes_with(&l, "night").unwrap();
+    assert!(night.contains(&"light") && !night.contains(&"knight"));
+    // Deterministic order: shortest first, then alphabetical.
+    assert!(
+        then.windows(2)
+            .all(|w| (w[0].len(), w[0]) <= (w[1].len(), w[1]))
+    );
+    assert!(rhymes_with(&l, "zyzzyva").is_err());
+    // The common-word list drops abbreviations, bare names and tiny tokens.
+    assert!(!l.is_common("cnn") && !l.is_common("ren") && !l.is_common("gen"));
+    assert!(l.is_common("men") && l.is_common("again") && l.is_common("chimes"));
+    assert!(
+        then.iter().any(|w| !l.is_common(w)),
+        "the raw list has noise to filter"
+    );
+}
+
+#[test]
+fn common_word_pin_detects_tampering() {
+    use syntaxeon_lexicon::lexicon::verify_common_pin;
+    let lock = include_str!("../lexicon/lexicon.lock");
+    let list = include_str!("../lexicon/common-words.txt");
+    assert_eq!(verify_common_pin(list, lock), Ok(()));
+    assert_eq!(
+        verify_common_pin(&format!("{list}extra\n"), lock)
+            .unwrap_err()
+            .code(),
+        "SXP-304"
+    );
 }

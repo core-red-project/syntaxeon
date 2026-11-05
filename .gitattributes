@@ -21,8 +21,9 @@ LICENSE text eol=lf
 *.sh text eol=lf
 Justfile text eol=lf
 
-# The pinned pronunciation lexicon is verified by sha256: its bytes must never be rewritten
+# The pinned lexicon and word list are verified by sha256: their bytes must never be rewritten
 *.dict -text -diff linguist-generated
+common-words.txt -text -diff linguist-generated
 
 # Lockfiles are generated
 *.lock text eol=lf linguist-generated

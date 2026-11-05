@@ -44,6 +44,8 @@ but the lexicon already carries stress so v2 needs no data change.
 - **Multiple pronunciations**: an entry may list several (`word`, `word(2)`).
   All are kept.
 
+A second pinned file, `common-words.txt` (ESDB size 35, US, lowercase, 38 658 words), is **not** part of the rhyme rule: it only decides which words `syntaxeon rhymes` suggests by default. Its pin and notice are recorded in the same `lexicon.lock`, and a mismatch is also `SXP-304`.
+
 Only **verse end words** are looked up (§5), so a program uses unusual
 vocabulary freely everywhere else.
 
@@ -73,7 +75,7 @@ For a pronunciation `p` (phoneme list):
   use their only vowel).
 - `tail(p)` = phonemes from the stressed vowel to the end, **stress digits
   removed**.
-- `onset(p)` = the single phoneme immediately before the stressed vowel,
+- `onset(p)` = the single phoneme immediately before the stressed vowel (stress digit ignored),
   or `∅` at word start.
 
 Two pronunciations `p`, `q` **rhyme** iff `tail(p) = tail(q)` and
@@ -93,11 +95,12 @@ terminal punctuation, with these rules:
   word (`"…"`, `"42"`) ⇒ `SXP-203`.
 - **Verse ends in a numeral** (`ten`, `10`, `3.14`): numerals are verbalized
   to English short-scale cardinals without `and` (`10`→`ten`, `21`→
-  `twenty-one`, `100`→`hundred`, `3.14`→…`four`); the end word is the last
+  `twenty-one` → `one`, `100`→`hundred`, `3.14`→…`four`); the end word is the last
   word of that reading. Number-words are already words.
 - **Verse ends in an aside or pragma**: those are excluded; the end word is
   the previous word. A verse that is only an aside is dropped (literary
   layer).
+- **Hyphenated words rhyme on their last component** (`seventy-five` → `five`, `mother-in-law` → `law`). Compounds carry their primary stress on the first part, so the whole word's tail does not match what a reader hears. This applies to verbalized numerals too.
 - Apostrophes inside a word are kept (`o'er`).
 - A word absent from lexicon and pragmas ⇒ `SXP-301`.
 

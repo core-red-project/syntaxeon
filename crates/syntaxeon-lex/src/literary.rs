@@ -66,6 +66,12 @@ fn is_structural(toks: &[Token]) -> bool {
             if **a == w("so") && **b == w("be") && **c == w("it"))
 }
 
+/// Hyphenated words rhyme on their last component: `seventy-five` stresses `seventy`, but a
+/// reader hears `five` (`spec/PROSODY.md` §5).
+fn last_component(word: &str) -> String {
+    word.rsplit('-').next().unwrap_or(word).to_string()
+}
+
 fn end_word(toks: &[Token]) -> Result<String, NoEndWord> {
     let last = toks
         .iter()
@@ -73,8 +79,8 @@ fn end_word(toks: &[Token]) -> Result<String, NoEndWord> {
         .find(|t| !matches!(t.tok, Tok::Punct(_)))
         .ok_or(NoEndWord)?;
     match &last.tok {
-        Tok::Word(w) => Ok(w.clone()),
-        Tok::Int(n) => Ok(cardinal_last_word(n.unsigned_abs())),
+        Tok::Word(w) => Ok(last_component(w)),
+        Tok::Int(n) => Ok(last_component(&cardinal_last_word(n.unsigned_abs()))),
         Tok::Float { text, .. } => {
             let digit = text
                 .chars()
@@ -93,7 +99,7 @@ fn last_word_in(s: &str) -> Option<String> {
     s.split(|c: char| !(c.is_alphabetic() || c == '\'' || c == '-'))
         .map(|w| w.trim_matches(|c| c == '\'' || c == '-'))
         .rfind(|w| w.chars().any(char::is_alphabetic))
-        .map(str::to_lowercase)
+        .map(|w| last_component(&w.to_lowercase()))
 }
 
 const ONES: [&str; 20] = [

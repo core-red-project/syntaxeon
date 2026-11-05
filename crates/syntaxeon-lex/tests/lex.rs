@@ -26,7 +26,7 @@ fn tokens_and_folding() {
     assert!(matches!(toks[toks.len() - 4], Tok::Float { .. }));
     assert_eq!(toks[toks.len() - 2], Tok::Int(5));
     assert_eq!(toks[toks.len() - 1], Tok::Punct('.'));
-    assert!(l.diagnostics.is_empty());
+    assert_eq!(l.diagnostics.len(), 0);
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn asides_are_dropped_and_nest() {
     let l = lex("one (a (nested) note\nover lines) two\n");
     let words: Vec<_> = l.tokens.iter().map(|t| &t.tok).collect();
     assert_eq!(words, [&Tok::Word("one".into()), &Tok::Word("two".into())]);
-    assert!(l.diagnostics.is_empty());
+    assert_eq!(l.diagnostics.len(), 0);
 }
 
 #[test]
@@ -75,6 +75,19 @@ fn end_words() {
     assert_eq!(ends[2], Ok("ten".to_string()));
     assert_eq!(ends[3], Ok("four".to_string()));
     assert!(ends[4].is_err());
+}
+
+#[test]
+fn hyphenated_words_rhyme_on_their_last_component() {
+    let ends = |src: &str| stanzas(&lex(src))[0].verses[0].end_word.clone();
+    assert_eq!(ends("Speak twenty-one.\n"), Ok("one".to_string()));
+    assert_eq!(ends("Let x be 75.\n"), Ok("five".to_string()));
+    assert_eq!(
+        ends("Speak \"a well-known man-of-war\".\n"),
+        Ok("war".to_string())
+    );
+    // Runs of hyphens and apostrophes inside a word are kept apart from the split.
+    assert_eq!(ends("Speak \"o'er\".\n"), Ok("o'er".to_string()));
 }
 
 #[test]
@@ -108,7 +121,7 @@ fn structural_verses_are_exempt() {
 #[test]
 fn valid_program_passes() {
     let src = "Thus begins the tale of men:\nSpeak \"Hello again\".\nProclaim the text of ten.\nSpeak \"Amen\".\n";
-    assert!(codes(src).is_empty());
+    assert_eq!(codes(src).len(), 0);
 }
 
 #[test]
@@ -132,8 +145,8 @@ fn pragma_makes_a_word_pronounceable() {
     let st = stanzas(&lexed);
     let mut lx = lexicon();
     assert!(lx.lookup("blorn").is_none());
-    assert!(lexed.diagnostics.is_empty());
-    assert!(check(&lexed, &st, &mut lx).is_empty());
+    assert_eq!(lexed.diagnostics.len(), 0);
+    assert_eq!(check(&lexed, &st, &mut lx).len(), 0);
     // Same program without the pragma: blorn is unknown.
     assert_eq!(
         codes("Thus begins the tale of born:\nSpeak \"blorn\".\n"),
@@ -149,5 +162,5 @@ fn pragma_errors() {
         ["SXP-303"]
     );
     // An ordinary aside is a comment, not a pragma.
-    assert!(codes("(a comment)\nmen.\nten.\n").is_empty());
+    assert_eq!(codes("(a comment)\nmen.\nten.\n").len(), 0);
 }

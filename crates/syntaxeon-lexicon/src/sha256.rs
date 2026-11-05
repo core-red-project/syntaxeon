@@ -88,10 +88,11 @@ pub fn sha256_hex(data: &[u8]) -> String {
         msg.push(0);
     }
     msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    // The padding above makes the length a multiple of 64, so there is no remainder.
+    for block in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, b) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

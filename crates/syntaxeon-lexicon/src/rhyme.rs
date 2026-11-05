@@ -41,3 +41,24 @@ pub fn tail_string(p: &[Phone]) -> Option<String> {
     let (tail, _) = split(p)?;
     Some(tail.iter().map(|x| x.base).collect::<Vec<_>>().join(" "))
 }
+
+/// Every word in the lexicon that rhymes with `word` (`spec/PROSODY.md` §4), `word` excluded,
+/// ordered by length and then alphabetically so the result is deterministic.
+pub fn rhymes_with<'a>(lex: &'a Lexicon, word: &str) -> Result<Vec<&'a str>, Unpronounceable> {
+    let key = word.to_lowercase();
+    let targets = lex
+        .lookup(&key)
+        .ok_or_else(|| Unpronounceable(word.to_string()))?;
+    let mut found: Vec<&str> = lex
+        .words()
+        .filter(|(w, prons)| {
+            *w != key
+                && prons
+                    .iter()
+                    .any(|p| targets.iter().any(|t| pron_rhymes(t, p)))
+        })
+        .map(|(w, _)| w)
+        .collect();
+    found.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    Ok(found)
+}

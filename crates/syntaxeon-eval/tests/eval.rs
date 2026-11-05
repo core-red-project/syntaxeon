@@ -18,7 +18,7 @@ fn exec(src: &str, input: &str) -> (Result<(), RuntimeError>, String) {
             let (p, d) = parse_program(&l, &st);
             assert!(l.diagnostics.is_empty() && d.is_empty(), "front-end: {d:?}");
             let c = check(&p);
-            assert!(c.is_empty(), "checker: {c:?}");
+            assert_eq!(c.len(), 0, "checker: {c:?}");
             let mut out = Vec::new();
             let r = run(&p, &mut input.as_bytes(), &mut out);
             (r, String::from_utf8(out).unwrap())

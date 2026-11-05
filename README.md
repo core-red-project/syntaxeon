@@ -49,7 +49,7 @@ Syntaxeon is a CoreRed project, part of the Sxnnyside Project's experimental bra
 
 ### Prerequisites
 
-- Rust (1.93 or newer; the repository pins `1.93.0`)
+- Rust (1.93 or newer; the repository pins `1.99.1`)
 - [just](https://github.com/casey/just) (to run the project recipes)
 
 ### From Source
@@ -79,6 +79,7 @@ Speak "Amen".
 syntaxeon check tale.sxe      # syntax, types and rhyme
 syntaxeon explain tale.sxe    # end-word tails, rhyme groups, verdict
 syntaxeon run tale.sxe        # check, then execute
+syntaxeon rhymes then         # find a word to end the next verse with
 ```
 
 The four end words (`men`, `again`, `ten`, `amen`) form the stanza's `AABB` scheme, which is why the program is valid. Change `"Hello again"` to `"Hello"` and `check` fails with `SXP-202`. More programs are in [examples/](examples/).
@@ -91,10 +92,11 @@ The four end words (`men`, `again`, `ten`, `amen`) form the stanza's `AABB` sche
 | `explain <file>` | Show how each stanza reads and rhymes |
 | `ast <file>` | Dump the canonical AST |
 | `run <file>` | Check, then run the program (`hear` reads standard input) |
+| `rhymes <word>` | List common words that rhyme with a word, one per line (`--limit <n>`, `--all` for every lexicon word, `--json`) |
 | `completions <shell>` | Print a completion script: bash, zsh, fish, powershell |
 | `help`, `version` | Usage and version |
 
-Global options: `-q`/`--quiet`, `-v`/`--verbose`, `--json` (`check` only), `--no-color`, `-h`/`--help`, `-V`/`--version`. Use `-` as the file to read standard input (except for `run`).
+Global options: `-q`/`--quiet`, `-v`/`--verbose`, `--json` (`check` and `rhymes`), `--no-color`, `-h`/`--help`, `-V`/`--version`. Use `-` as the file to read standard input (except for `run`).
 
 ### Output and exit codes
 
@@ -151,7 +153,7 @@ Before contributing, read the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details. The vendored pronunciation dictionary keeps its own notice in [crates/syntaxeon-lexicon/lexicon/CMUDICT-LICENSE](crates/syntaxeon-lexicon/lexicon/CMUDICT-LICENSE).
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details. The vendored pronunciation dictionary and the common-word list used by `rhymes` keep their own notices in [CMUDICT-LICENSE](crates/syntaxeon-lexicon/lexicon/CMUDICT-LICENSE) and [COMMON-WORDS-LICENSE](crates/syntaxeon-lexicon/lexicon/COMMON-WORDS-LICENSE).
 
 ---
 

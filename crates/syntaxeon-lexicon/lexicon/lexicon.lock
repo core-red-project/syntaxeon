@@ -5,3 +5,11 @@ commit = "74790861f652b15e4ac49015a90074ad62a27690"
 file = "cmudict.dict"
 sha256 = "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22"
 license = "lexicon/CMUDICT-LICENSE"
+
+# Words that count as common for `syntaxeon rhymes` (not used by the rhyme check itself).
+common_words_source = "https://app.aspell.net/create (ESDB, formerly SCOWL)"
+common_words_parameters = "size 35, spelling US, variant level 1, diacritics strip, lowercase words only"
+common_words_revision = "ESDB git 1e5b7d3 (2026-06-24)"
+common_words_file = "common-words.txt"
+common_words_sha256 = "338a516856f72ac9970a1c2940c6e370df3b1d2e21f322085f3d2ca27f96b66b"
+common_words_license = "lexicon/COMMON-WORDS-LICENSE"

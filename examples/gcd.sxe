@@ -1,0 +1,11 @@
+Thus begins the tale unseen:
+Proclaim the text of calling gcd with 48, 18.
+Proclaim the text of calling gcd with 100, 75.
+Speak "Still alive".
+
+To gcd, taking men as whole number, and lumber as whole number, giving whole number:
+If the lumber is zero, then:
+Give back the men.
+Otherwise:
+Give back calling gcd with the lumber, the remainder of the men and the lumber.
+So be it.

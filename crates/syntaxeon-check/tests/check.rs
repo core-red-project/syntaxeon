@@ -32,7 +32,7 @@ fn the_worked_example_type_checks() {
         So be it.\n\n\
         To double, taking the number as whole number, giving whole number:\n\
         Give back the product of the number and two.\n";
-    assert!(codes(src).is_empty());
+    assert_eq!(codes(src).len(), 0);
 }
 
 #[test]
@@ -120,7 +120,10 @@ fn operators_reject_wrong_types() {
 fn duplicate_declaration_in_one_block() {
     assert_eq!(entry("Let x be 1.\nLet x be 2."), ["SXP-401"]);
     // Shadowing an outer block's name is allowed.
-    assert!(entry("Let x be 1.\nDo this 2 times:\nLet x be \"inner\".\nSo be it.").is_empty());
+    assert_eq!(
+        entry("Let x be 1.\nDo this 2 times:\nLet x be \"inner\".\nSo be it.").len(),
+        0
+    );
     let dup = "Thus begins t:\nReturn nothing.\n\nTo f, taking x as whole number, x as text:\nReturn nothing.\n";
     assert_eq!(codes(dup), ["SXP-401"]);
 }
@@ -164,7 +167,10 @@ fn list_elements_agree() {
 fn calls_check_arity_and_argument_types() {
     let head = "Thus begins t:\n";
     let f = "\n\nTo twice, taking n as whole number, giving whole number:\nGive back the product of the n and 2.\n";
-    assert!(codes(&format!("{head}Let x be calling twice with 3.{f}")).is_empty());
+    assert_eq!(
+        codes(&format!("{head}Let x be calling twice with 3.{f}")).len(),
+        0
+    );
     assert_eq!(
         codes(&format!("{head}Let x be calling twice with 3, 4.{f}")),
         ["SXP-413"]
@@ -187,7 +193,7 @@ fn calls_check_arity_and_argument_types() {
         codes(&format!("{head}Let x be calling quiet.{g}")),
         ["SXP-402"]
     );
-    assert!(codes(&format!("{head}Call quiet.{g}")).is_empty());
+    assert_eq!(codes(&format!("{head}Call quiet.{g}")).len(), 0);
 }
 
 #[test]
@@ -196,7 +202,7 @@ fn recursion_and_forward_references() {
         To fact, taking n as whole number, giving whole number:\n\
         If the n is 0, then:\nGive back 1.\nOtherwise:\n\
         Give back the product of the n and calling fact with the difference of the n and 1.\nSo be it.\n";
-    assert!(codes(src).is_empty(), "{:?}", codes(src));
+    assert_eq!(codes(src).len(), 0, "{:?}", codes(src));
 }
 
 #[test]
@@ -240,7 +246,7 @@ fn returns() {
 #[test]
 fn entry_cannot_return_a_value() {
     assert_eq!(entry("Give back 1."), ["SXP-405"]);
-    assert!(entry("Return nothing.").is_empty());
+    assert_eq!(entry("Return nothing.").len(), 0);
 }
 
 #[test]

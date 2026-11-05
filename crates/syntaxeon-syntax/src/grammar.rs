@@ -1,134 +1,63 @@
 //! Sentence-level grammar (`spec/PROSE_GRAMMAR.md` §4–§7). Every function returns all parses.
 
+use crate::rules::{
+    COMPARE, CONVERSIONS, DETS, FORMS, HEADERS, HeaderKind, INFIX, JOIN, Make, PREFIX_ARITH,
+    PREFIX_CALL, PREFIX_UNARY, RESERVED, RETURN_LEADS, SIMPLE_TYPES, SPEAK, Step, THE_HEADS,
+    number_word,
+};
 use syntaxeon_core::{BinOp, Expr, Name, Param, StmtKind, Target, Type, UnOp};
 use syntaxeon_lex::lexer::Tok;
+
+/// Parts collected while matching a [`Form`](crate::rules::Form).
+#[derive(Clone, Default)]
+struct Slots {
+    name: Option<Name>,
+    target: Option<Target>,
+    ty: Option<Type>,
+    mutable: bool,
+    expr: Option<Expr>,
+}
 
 /// All ways to parse a prefix: each result is a value and the index just past it.
 type R<T> = Vec<(T, usize)>;
 
-const DETS: [&str; 8] = ["the", "this", "that", "a", "an", "my", "thy", "our"];
-
-/// Words that can never appear inside a `Name` (`spec/PROSE_GRAMMAR.md` §5).
-const RESERVED: &[&str] = &[
-    "the",
-    "this",
-    "that",
-    "a",
-    "an",
-    "my",
-    "thy",
-    "our",
-    "shall",
-    "be",
-    "become",
-    "now",
-    "let",
-    "speak",
-    "proclaim",
-    "give",
-    "return",
-    "call",
-    "calling",
-    "if",
-    "then",
-    "otherwise",
-    "as",
-    "do",
-    "times",
-    "so",
-    "it",
-    "true",
-    "false",
-    "both",
-    "and",
-    "either",
-    "or",
-    "not",
-    "is",
-    "less",
-    "greater",
-    "than",
-    "at",
-    "least",
-    "most",
-    "plus",
-    "minus",
-    "over",
-    "modulo",
-    "item",
-    "taking",
-    "giving",
-    "thus",
-    "what",
-    "heard",
-    "appended",
-    "with",
-    "nothing",
-];
-
-/// After `the`, a name starting with one of these would collide with a prefix form.
-const THE_HEADS: &[&str] = &[
-    "sum",
-    "difference",
-    "product",
-    "quotient",
-    "remainder",
-    "text",
-    "whole",
-    "fraction",
-    "length",
-    "negation",
-    "letter",
-];
-
-/// Builtins produced by conversions; their results are not `with … appended` bases.
-const CONVERSIONS: &[&str] = &["to_string", "to_integer", "to_float", "length", "hear"];
-
-const ONES: [&str; 20] = [
-    "zero",
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "ten",
-    "eleven",
-    "twelve",
-    "thirteen",
-    "fourteen",
-    "fifteen",
-    "sixteen",
-    "seventeen",
-    "eighteen",
-    "nineteen",
-];
-const TENS: [&str; 10] = [
-    "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
-];
-
-#[allow(clippy::cast_possible_wrap)] // values are at most 99
-fn number_word(w: &str) -> Option<i64> {
-    if let Some(n) = ONES.iter().position(|x| *x == w) {
-        return Some(n as i64);
-    }
-    let tens = |s: &str| TENS.iter().position(|x| !x.is_empty() && *x == s);
-    if let Some(t) = tens(w) {
-        return Some(t as i64 * 10);
-    }
-    let (t, o) = w.split_once('-')?;
-    let ones = ONES
-        .iter()
-        .position(|x| *x == o)
-        .filter(|n| (1..=9).contains(n))?;
-    Some((tens(t)? * 10 + ones) as i64)
-}
-
 fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
     Expr::Binary(op, Box::new(a), Box::new(b))
+}
+
+/// Where a name appears, which decides what it may contain.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameKind {
+    /// A stanza title or a call target: may contain `of` (`the tale of men`).
+    Title,
+    /// A declared name, parameter or assignment target: no `of`, which would make
+    /// `item i of the pile of xs` unreadable (`spec/PROSE_GRAMMAR.md` §9).
+    Binding,
+    /// A variable used in an expression: no `of`, and not a bare number-word.
+    Var,
+}
+
+/// Whether `e` ends inside an unbounded construct that would swallow whatever comes next: a
+/// list literal, or a call with arguments (`spec/PROSE_GRAMMAR.md` §7.4). A comma or an
+/// infix/comparison word after such an expression belongs to the construct, never to what
+/// contains it, so every sentence keeps one reading.
+fn open_tail(e: &Expr) -> bool {
+    match e {
+        Expr::List(_) => true,
+        Expr::Call(n, args) if CONVERSIONS.contains(&n.as_str()) => {
+            args.last().is_some_and(open_tail)
+        }
+        Expr::Call(n, args) => n != "append" && !args.is_empty(),
+        Expr::Unary(_, a) | Expr::Index(a, _) => open_tail(a),
+        Expr::Binary(_, _, b) => open_tail(b),
+        _ => false,
+    }
+}
+
+/// How to parse one list element and whether an element is open (see [`open_tail`]).
+struct ListOps<'a, T> {
+    item: &'a dyn Fn(usize) -> R<T>,
+    open: &'a dyn Fn(&T) -> bool,
 }
 
 pub(crate) enum Open {
@@ -160,8 +89,8 @@ impl P<'_> {
     // ---- names and types -------------------------------------------------------------
 
     /// `[determiner] word { word }`; a quoted string is a name too where `quoted` is set.
-    /// `as_var` forbids a bare number-word, which is a literal there.
-    fn name(&self, i: usize, as_var: bool, quoted: bool) -> R<Name> {
+    /// `kind` decides which words may appear inside (see [`NameKind`]).
+    fn name(&self, i: usize, kind: NameKind, quoted: bool) -> R<Name> {
         let mut out = Vec::new();
         if quoted && let Some(Tok::Str(s)) = self.t.get(i) {
             out.push((s.clone(), i + 1));
@@ -181,11 +110,11 @@ impl P<'_> {
         }
         let mut words: Vec<&str> = Vec::new();
         while let Some(Tok::Word(w)) = self.t.get(start + words.len()) {
-            if RESERVED.contains(&w.as_str()) {
+            if RESERVED.contains(&w.as_str()) || (kind != NameKind::Title && w == "of") {
                 break;
             }
             words.push(w);
-            if as_var && words.len() == 1 && number_word(w).is_some() {
+            if kind == NameKind::Var && words.len() == 1 && number_word(w).is_some() {
                 continue;
             }
             out.push((words.join(" "), start + words.len()));
@@ -195,14 +124,7 @@ impl P<'_> {
 
     fn typ(&self, i: usize) -> R<Type> {
         let mut out = Vec::new();
-        let simple: [(&[&str], Type); 5] = [
-            (&["whole", "number"], Type::Integer),
-            (&["fraction"], Type::Float),
-            (&["truth"], Type::Boolean),
-            (&["text"], Type::String),
-            (&["letter"], Type::Character),
-        ];
-        for (ws, ty) in simple {
+        for (ws, ty) in SIMPLE_TYPES {
             if let Some(j) = self.seq(i, ws) {
                 out.push((ty, j));
             }
@@ -218,32 +140,33 @@ impl P<'_> {
     }
 
     /// `X { "," X } [ "," "and" X ]`
-    fn list_of<T: Clone>(&self, i: usize, f: &dyn Fn(usize) -> R<T>) -> R<Vec<T>> {
+    fn list_of<T: Clone>(
+        &self,
+        i: usize,
+        f: &dyn Fn(usize) -> R<T>,
+        open: &dyn Fn(&T) -> bool,
+    ) -> R<Vec<T>> {
+        let ops = ListOps { item: f, open };
         let mut out = Vec::new();
         for (x, j) in f(i) {
-            self.list_tail(j, &[x], f, &mut out);
+            self.list_tail(j, &[x], &ops, &mut out);
         }
         out
     }
 
-    fn list_tail<T: Clone>(
-        &self,
-        j: usize,
-        acc: &[T],
-        f: &dyn Fn(usize) -> R<T>,
-        out: &mut R<Vec<T>>,
-    ) {
+    fn list_tail<T: Clone>(&self, j: usize, acc: &[T], ops: &ListOps<T>, out: &mut R<Vec<T>>) {
         out.push((acc.to_vec(), j));
-        if !self.punct(j, ',') {
+        // A comma after an open element belongs to that element (innermost list wins).
+        if !self.punct(j, ',') || acc.last().is_some_and(ops.open) {
             return;
         }
-        for (x, k) in f(j + 1) {
+        for (x, k) in (ops.item)(j + 1) {
             let mut a = acc.to_vec();
             a.push(x);
-            self.list_tail(k, &a, f, out);
+            self.list_tail(k, &a, ops, out);
         }
         if self.word(j + 1, "and") {
-            for (x, k) in f(j + 2) {
+            for (x, k) in (ops.item)(j + 2) {
                 let mut a = acc.to_vec();
                 a.push(x);
                 out.push((a, k));
@@ -254,7 +177,7 @@ impl P<'_> {
     // ---- expressions -------------------------------------------------------------------
 
     fn args(&self, i: usize) -> R<Vec<Expr>> {
-        self.list_of(i, &|k| self.expr(k))
+        self.list_of(i, &|k| self.expr(k), &open_tail)
     }
 
     fn atom(&self, i: usize) -> R<Expr> {
@@ -283,7 +206,7 @@ impl P<'_> {
             out.push((Expr::Call("hear".into(), vec![]), j));
         }
         if let Some(j) = self.seq(i, &["calling"]) {
-            for (n, k) in self.name(j, false, false) {
+            for (n, k) in self.name(j, NameKind::Title, false) {
                 out.push((Expr::Call(n.clone(), vec![]), k));
                 if self.word(k, "with") {
                     for (args, l) in self.args(k + 1) {
@@ -312,7 +235,7 @@ impl P<'_> {
             );
         }
         out.extend(
-            self.name(i, true, false)
+            self.name(i, NameKind::Var, false)
                 .into_iter()
                 .map(|(n, j)| (Expr::Var(n), j)),
         );
@@ -321,25 +244,12 @@ impl P<'_> {
 
     fn prefix(&self, i: usize) -> R<Expr> {
         let mut out = Vec::new();
-        let arith: [(&[&str], BinOp); 5] = [
-            (&["the", "sum", "of"], BinOp::Add),
-            (&["the", "difference", "of"], BinOp::Sub),
-            (&["the", "product", "of"], BinOp::Mul),
-            (&["the", "quotient", "of"], BinOp::Div),
-            (&["the", "remainder", "of"], BinOp::Mod),
-        ];
-        for (ws, op) in arith {
+        for (ws, op) in PREFIX_ARITH {
             if let Some(j) = self.seq(i, ws) {
-                self.pair(j, "and", op, &|k| self.arith(k), &mut out);
+                self.pair(j, "and", op, &|k| self.operand(k), &mut out);
             }
         }
-        let convert: [(&[&str], &str); 4] = [
-            (&["the", "text", "of"], "to_string"),
-            (&["the", "whole", "number", "of"], "to_integer"),
-            (&["the", "fraction", "of"], "to_float"),
-            (&["the", "length", "of"], "length"),
-        ];
-        for (ws, f) in convert {
+        for (ws, f) in PREFIX_CALL {
             if let Some(j) = self.seq(i, ws) {
                 out.extend(
                     self.operand(j)
@@ -348,19 +258,14 @@ impl P<'_> {
                 );
             }
         }
-        if let Some(j) = self.seq(i, &["the", "negation", "of"]) {
-            out.extend(
-                self.operand(j)
-                    .into_iter()
-                    .map(|(e, k)| (Expr::Unary(UnOp::Neg, Box::new(e)), k)),
-            );
-        }
-        if let Some(j) = self.seq(i, &["not"]) {
-            out.extend(
-                self.operand(j)
-                    .into_iter()
-                    .map(|(e, k)| (Expr::Unary(UnOp::Not, Box::new(e)), k)),
-            );
+        for (ws, op) in PREFIX_UNARY {
+            if let Some(j) = self.seq(i, ws) {
+                out.extend(
+                    self.operand(j)
+                        .into_iter()
+                        .map(|(e, k)| (Expr::Unary(op, Box::new(e)), k)),
+                );
+            }
         }
         out
     }
@@ -393,7 +298,10 @@ impl P<'_> {
             Expr::Call(n, _) => !CONVERSIONS.contains(&n.as_str()),
             _ => false,
         };
-        let mut cur: R<Expr> = base.into_iter().filter(|(e, _)| appendable(e)).collect();
+        let mut cur: R<Expr> = base
+            .into_iter()
+            .filter(|(e, _)| appendable(e) && !open_tail(e))
+            .collect();
         while !cur.is_empty() {
             let mut next = Vec::new();
             for (list, j) in &cur {
@@ -415,19 +323,11 @@ impl P<'_> {
         out
     }
 
-    /// An operand, or `operand infix-word operand` (no chaining). The arguments of the
-    /// arithmetic prefix forms use this, so a comparison can never be swallowed by them.
+    /// An operand, or `operand infix-word operand` (no chaining).
     fn arith(&self, i: usize) -> R<Expr> {
         let mut out = self.operand(i);
-        let infix: [(&str, BinOp); 5] = [
-            ("plus", BinOp::Add),
-            ("minus", BinOp::Sub),
-            ("times", BinOp::Mul),
-            ("over", BinOp::Div),
-            ("modulo", BinOp::Mod),
-        ];
-        for (a, j) in self.operand(i) {
-            for (w, op) in infix {
+        for (a, j) in self.operand(i).into_iter().filter(|(a, _)| !open_tail(a)) {
+            for (w, op) in INFIX {
                 if self.word(j, w) {
                     for (b, k) in self.operand(j + 1) {
                         out.push((bin(op, a.clone(), b), k));
@@ -443,16 +343,8 @@ impl P<'_> {
     /// side of a comparison (`both a and b is c` has exactly one reading).
     pub(crate) fn expr(&self, i: usize) -> R<Expr> {
         let mut out = self.arith(i);
-        let cmp: [(&[&str], BinOp); 6] = [
-            (&["is", "not"], BinOp::Ne),
-            (&["is", "less", "than"], BinOp::Lt),
-            (&["is", "greater", "than"], BinOp::Gt),
-            (&["is", "at", "most"], BinOp::Le),
-            (&["is", "at", "least"], BinOp::Ge),
-            (&["is"], BinOp::Eq),
-        ];
-        for (a, j) in self.operand(i) {
-            for (ws, op) in cmp {
+        for (a, j) in self.operand(i).into_iter().filter(|(a, _)| !open_tail(a)) {
+            for (ws, op) in COMPARE {
                 if let Some(k) = self.seq(j, ws) {
                     for (b, l) in self.operand(k) {
                         // `a is not b` is Ne only; never Eq(a, Not(b)).
@@ -464,11 +356,10 @@ impl P<'_> {
                 }
             }
         }
-        if let Some(j) = self.seq(i, &["both"]) {
-            self.pair(j, "and", BinOp::And, &|k| self.expr(k), &mut out);
-        }
-        if let Some(j) = self.seq(i, &["either"]) {
-            self.pair(j, "or", BinOp::Or, &|k| self.expr(k), &mut out);
+        for (opener, sep, op) in JOIN {
+            if let Some(j) = self.seq(i, &[opener]) {
+                self.pair(j, sep, op, &|k| self.expr(k), &mut out);
+            }
         }
         out
     }
@@ -477,14 +368,14 @@ impl P<'_> {
 
     fn target(&self, i: usize) -> R<Target> {
         let mut out: R<Target> = self
-            .name(i, false, true)
+            .name(i, NameKind::Binding, true)
             .into_iter()
             .map(|(n, j)| (Target::Name(n), j))
             .collect();
         if let Some(j) = self.seq(i, &["item"]) {
             for (idx, k) in self.operand(j) {
                 if self.word(k, "of") {
-                    for (n, l) in self.name(k + 1, false, true) {
+                    for (n, l) in self.name(k + 1, NameKind::Binding, true) {
                         out.push((Target::Index(n, idx.clone()), l));
                     }
                 }
@@ -518,106 +409,104 @@ impl P<'_> {
 
     /// All parses of one whole simple sentence (terminator already removed).
     pub(crate) fn statement(&self) -> Vec<StmtKind> {
-        let mut out = self.declarations();
-        out.extend(self.assignments());
+        let mut out = self.forms();
         out.extend(self.actions());
         out
     }
 
-    /// Declarations D1–D3 (`spec/PROSE_GRAMMAR.md` §6.1).
-    fn declarations(&self) -> Vec<StmtKind> {
-        let n = self.t.len();
+    /// Declarations and assignments, read from the [`FORMS`] table.
+    fn forms(&self) -> Vec<StmtKind> {
         let mut out = Vec::new();
-        let decl = |name: &Name, ty: &Option<Type>, mutable, init: Expr| StmtKind::Decl {
-            name: name.clone(),
-            ty: ty.clone(),
-            mutable,
-            init,
-        };
-        // D1: N [", a T,"] shall V E
-        for (name, j) in self.name(0, false, true) {
-            for (ty, k) in self.annot(j) {
-                if self.word(k, "shall")
-                    && let Some((m, l)) = self.verb(k + 1)
-                {
-                    out.extend(
-                        self.expr(l)
-                            .into_iter()
-                            .filter(|(_, r)| *r == n)
-                            .map(|(e, _)| decl(&name, &ty, m, e)),
-                    );
-                }
-            }
-        }
-        // D2: Let N [", a T,"] V E
-        if self.word(0, "let") {
-            for (name, j) in self.name(1, false, true) {
-                for (ty, k) in self.annot(j) {
-                    if let Some((m, l)) = self.verb(k) {
-                        out.extend(
-                            self.expr(l)
-                                .into_iter()
-                                .filter(|(_, r)| *r == n)
-                                .map(|(e, _)| decl(&name, &ty, m, e)),
-                        );
-                    }
-                }
-            }
-        }
-        // D3: E shall N [", a T,"] V
-        for (e, j) in self.expr(0) {
-            if !self.word(j, "shall") {
-                continue;
-            }
-            for (name, k) in self.name(j + 1, false, true) {
-                for (ty, l) in self.annot(k) {
-                    if let Some((m, r)) = self.verb(l)
-                        && r == n
-                    {
-                        out.push(decl(&name, &ty, m, e.clone()));
-                    }
-                }
-            }
+        for form in FORMS {
+            let mut done = Vec::new();
+            self.run_steps(form.steps, 0, Slots::default(), &mut done);
+            out.extend(done.into_iter().filter_map(|s| match form.make {
+                Make::Decl => Some(StmtKind::Decl {
+                    name: s.name?,
+                    ty: s.ty,
+                    mutable: s.mutable,
+                    init: s.expr?,
+                }),
+                Make::Assign => Some(StmtKind::Assign {
+                    target: s.target?,
+                    value: s.expr?,
+                }),
+            }));
         }
         out
     }
 
-    /// Assignments A1–A3 (`spec/PROSE_GRAMMAR.md` §6.2); `now` is the marker.
-    fn assignments(&self) -> Vec<StmtKind> {
-        let mut out = Vec::new();
-        for (x, j) in self.target(0) {
-            if let Some(k) = self.seq(j, &["shall", "now", "be"]) {
-                self.finish_assign(&x, k, &mut out);
+    /// Matches `steps` from token `i`; every complete match must end at the last token.
+    fn run_steps(&self, steps: &[Step], i: usize, slots: Slots, out: &mut Vec<Slots>) {
+        let Some((step, rest)) = steps.split_first() else {
+            if i == self.t.len() {
+                out.push(slots);
             }
-        }
-        if self.word(0, "let") {
-            for (x, j) in self.target(1) {
-                if let Some(k) = self.seq(j, &["now", "be"]) {
-                    self.finish_assign(&x, k, &mut out);
+            return;
+        };
+        match step {
+            Step::Words(ws) => {
+                if let Some(j) = self.seq(i, ws) {
+                    self.run_steps(rest, j, slots, out);
+                }
+            }
+            Step::Name => {
+                for (name, j) in self.name(i, NameKind::Binding, true) {
+                    let s = Slots {
+                        name: Some(name),
+                        ..slots.clone()
+                    };
+                    self.run_steps(rest, j, s, out);
+                }
+            }
+            Step::Target => {
+                for (target, j) in self.target(i) {
+                    let s = Slots {
+                        target: Some(target),
+                        ..slots.clone()
+                    };
+                    self.run_steps(rest, j, s, out);
+                }
+            }
+            Step::Annot => {
+                for (ty, j) in self.annot(i) {
+                    self.run_steps(
+                        rest,
+                        j,
+                        Slots {
+                            ty,
+                            ..slots.clone()
+                        },
+                        out,
+                    );
+                }
+            }
+            Step::Verb => {
+                if let Some((mutable, j)) = self.verb(i) {
+                    self.run_steps(rest, j, Slots { mutable, ..slots }, out);
+                }
+            }
+            Step::Expr => {
+                for (e, j) in self.expr(i) {
+                    self.run_steps(
+                        rest,
+                        j,
+                        Slots {
+                            expr: Some(e),
+                            ..slots.clone()
+                        },
+                        out,
+                    );
                 }
             }
         }
-        for (e, j) in self.expr(0) {
-            if !self.word(j, "shall") {
-                continue;
-            }
-            for (x, k) in self.target(j + 1) {
-                if self.seq(k, &["now", "be"]) == Some(self.t.len()) {
-                    out.push(StmtKind::Assign {
-                        target: x,
-                        value: e.clone(),
-                    });
-                }
-            }
-        }
-        out
     }
 
     /// Output, call and return statements (`spec/PROSE_GRAMMAR.md` §6.3–§6.5).
     fn actions(&self) -> Vec<StmtKind> {
         let n = self.t.len();
         let mut out = Vec::new();
-        for (w, f) in [("speak", "speak"), ("proclaim", "speakln")] {
+        for &(w, f) in SPEAK {
             if self.word(0, w) {
                 for (e, j) in self.expr(1) {
                     if j == n {
@@ -627,7 +516,7 @@ impl P<'_> {
             }
         }
         if self.word(0, "call") {
-            for (name, j) in self.name(1, false, false) {
+            for (name, j) in self.name(1, NameKind::Title, false) {
                 if j == n {
                     out.push(StmtKind::Expr(Expr::Call(name.clone(), vec![])));
                 }
@@ -640,7 +529,7 @@ impl P<'_> {
                 }
             }
         }
-        for lead in [&["give", "back"][..], &["return"][..]] {
+        for lead in RETURN_LEADS {
             if let Some(j) = self.seq(0, lead) {
                 if self.seq(j, &["nothing"]) == Some(n) {
                     out.push(StmtKind::Return(None));
@@ -655,43 +544,36 @@ impl P<'_> {
         out
     }
 
-    fn finish_assign(&self, x: &Target, k: usize, out: &mut Vec<StmtKind>) {
-        for (e, r) in self.expr(k) {
-            if r == self.t.len() {
-                out.push(StmtKind::Assign {
-                    target: x.clone(),
-                    value: e,
-                });
-            }
-        }
-    }
-
     /// `If E, then` / `As long as E, do` / `Do this E times` (terminator `:` removed).
     pub(crate) fn block_header(&self) -> Vec<Open> {
         let mut out = Vec::new();
-        let n = self.t.len();
-        if self.word(0, "if") {
-            for (e, j) in self.expr(1) {
-                if self.punct(j, ',') && self.seq(j + 1, &["then"]) == Some(n) {
-                    out.push(Open::If(e));
-                }
-            }
-        }
-        if let Some(i) = self.seq(0, &["as", "long", "as"]) {
+        for h in HEADERS {
+            let Some(i) = self.seq(0, h.lead) else {
+                continue;
+            };
             for (e, j) in self.expr(i) {
-                if self.punct(j, ',') && self.seq(j + 1, &["do"]) == Some(n) {
-                    out.push(Open::While(e));
-                }
-            }
-        }
-        if let Some(i) = self.seq(0, &["do", "this"]) {
-            for (e, j) in self.expr(i) {
-                if self.seq(j, &["times"]) == Some(n) {
-                    out.push(Open::Repeat(e));
+                if self.tail(j, h.close) {
+                    out.push(match h.kind {
+                        HeaderKind::If => Open::If(e),
+                        HeaderKind::While => Open::While(e),
+                        HeaderKind::Repeat => Open::Repeat(e),
+                    });
                 }
             }
         }
         out
+    }
+
+    /// Whether `close` (words, with `","` for a comma) fills the rest of the sentence from `j`.
+    fn tail(&self, j: usize, close: &[&str]) -> bool {
+        j + close.len() == self.t.len()
+            && close.iter().enumerate().all(|(k, w)| {
+                if *w == "," {
+                    self.punct(j + k, ',')
+                } else {
+                    self.word(j + k, w)
+                }
+            })
     }
 
     // ---- stanza headers ----------------------------------------------------------------
@@ -700,7 +582,7 @@ impl P<'_> {
         let Some(i) = self.seq(0, &["thus", "begins"]) else {
             return vec![];
         };
-        self.name(i, false, true)
+        self.name(i, NameKind::Title, true)
             .into_iter()
             .filter(|(_, j)| *j == self.t.len())
             .map(|(n, _)| n)
@@ -709,7 +591,7 @@ impl P<'_> {
 
     fn param(&self, i: usize) -> R<Param> {
         let mut out = Vec::new();
-        for (name, j) in self.name(i, false, true) {
+        for (name, j) in self.name(i, NameKind::Binding, true) {
             if self.word(j, "as") {
                 out.extend(self.typ(j + 1).into_iter().map(|(ty, k)| {
                     (
@@ -730,10 +612,10 @@ impl P<'_> {
         if !self.word(0, "to") {
             return out;
         }
-        for (name, j) in self.name(1, false, true) {
+        for (name, j) in self.name(1, NameKind::Title, true) {
             let mut with_params: R<Vec<Param>> = vec![(vec![], j)];
             if self.punct(j, ',') && self.word(j + 1, "taking") {
-                with_params.extend(self.list_of(j + 2, &|k| self.param(k)));
+                with_params.extend(self.list_of(j + 2, &|k| self.param(k), &|_| false));
             }
             for (params, k) in with_params {
                 let mut rets: R<Type> = vec![(Type::Unit, k)];

@@ -217,19 +217,21 @@ A single-element list is `a list of E`; a zero-element list is §6.1's
 
 ### 7.3 Operators: prefix with arity, infix without chaining
 
-**Operand classes** (implemented in `syntaxeon-syntax`; they remove the
-ambiguities that appear when every prefix operand is a full expression):
+**Operand classes** (implemented in `syntaxeon-syntax`; they were found by fuzzing, §7.4,
+and remove every ambiguity it turned up):
 
-- *operand* — atom, `not`/`negation`/conversion form, or `base with E appended`;
+- *operand* — atom, `not`/`negation`/conversion form, an arithmetic prefix form, or
+  `base with E appended`;
 - *arith* — an operand, or `operand infix-word operand`;
 - *expr* — arith, a comparison (`operand is … operand`), or `both`/`either` over
   full exprs.
 
-The five arithmetic prefix forms take two *arith* operands, so
-`the sum of a and b is 5` is only `(the sum of a and b) is 5`. `both`/`either`
-exist only at *expr* level, so their result is never the left side of a
-comparison, and `the text of …` cannot wrap one (bind it with `Let` first).
-Names must not start with `the` + a prefix-form head word, nor `a`/`an` +
+The five arithmetic prefix forms take two *operands* (not *arith*): an infix word never
+appears inside `the sum of … and …`, so `the sum of a and b over c` is only
+`(the sum of a and b) over c`, and `the sum of a and b is 5` is only
+`(the sum of a and b) is 5`. `both`/`either` exist only at *expr* level, so their result is
+never the left side of a comparison, and `the text of …` cannot wrap one (bind it with `Let`
+first). Names must not start with `the` + a prefix-form head word, nor `a`/`an` +
 `list`/`empty`; determiners are reserved words, so `a` cannot be a name.
 
 Prefix forms take operands separated by `and` **by arity**: `the sum of`
@@ -260,6 +262,26 @@ operands extend to the next comparison/infix word.
 Argument lists (§6.4, §7.1) are delimited by `,`, so `and` inside one
 operand never leaks into the list.
 
+### 7.4 Open constructs: the comma and the infix word go to the innermost
+
+A *list literal* (`a list of …`) and a *call with arguments* (`calling f with …`) are **open**:
+their last element is a full expression, so it could also swallow whatever follows. An
+expression is open when it ends in one, directly or as the last operand of a prefix form,
+conversion, `not`, `negation` or `item … of`. Three rules make every use unambiguous:
+
+1. **A comma after an open element belongs to that element.** In
+   `calling f with calling g with 1, 2`, `g` takes both arguments and `f` takes one. To give
+   `f` two, bind `g`'s result first.
+2. **An open expression is never the left operand of an infix or comparison word.**
+   `calling gcd with 71 plus 12` is `gcd(71 + 12)`, and `a list of 56 is hero` is a list of
+   one comparison. Write `(the sum of …)` or bind the call to use its result as an operand.
+3. **`with … appended` needs a closed base.** `calling f with x with y appended` is
+   `f(x with y appended)`.
+
+Rules 1–3 are restrictions on derivations, not precedence: every sentence still has at most
+one reading, and one that fits none is rejected (`SXP-103`, or `SXP-106` when an infix word is
+involved) rather than guessed.
+
 ## 8. Blocks and the closer
 
 A header sentence ending in `:` that is not a stanza header opens a block.
@@ -272,7 +294,7 @@ boundary.
 ## 9. Name resolution at the surface
 
 `Name ::= [determiner] word { word }`, stopping at the next role word the
-current rule expects. Normalization to `Name` (determiner stripped, folded,
+current rule expects. A name that is *declared or used* (declarations, parameters, assignment targets, variables in expressions) may not contain the word `of`, so that `item i of xs` has one reading; stanza titles and call targets may (`the tale of men`). Normalization to `Name` (determiner stripped, folded,
 spaces collapsed) is defined in `SEMANTIC_CORE.md` §2. Because role words
 are reserved, `Let the counter be one.` is unambiguous: `the counter` is the
 maximal word run before `be`.
@@ -286,7 +308,7 @@ maximal word run before `be`.
 | 103 | no grammar rule matches the sentence |
 | 104 | ambiguous sentence (two or more parses) — lists the parses |
 | 105 | reserved word used inside a name |
-| 106 | chained infix operators |
+| 106 | an infix word where the grammar does not allow one: chained, inside a prefix form, or after a construct that is not a plain operand |
 | 107 | block structure error (stray/unclosed closer, `Otherwise`) |
 | 108 | `an empty list of T` outside an annotated Decl |
 | 109 | malformed stanza header; entry header not first |

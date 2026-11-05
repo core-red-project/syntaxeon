@@ -1,6 +1,6 @@
 //! Pronunciation lexicon in `CMUdict` format (`spec/PROSODY.md` §2–§3, §10).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -83,6 +83,8 @@ impl PragmaError {
 #[derive(Clone, Debug, Default)]
 pub struct Lexicon {
     entries: HashMap<String, Vec<Pron>>,
+    /// Common English words, for `rhymes` suggestions; empty unless loaded.
+    common: HashSet<String>,
 }
 
 impl Lexicon {
@@ -120,6 +122,27 @@ impl Lexicon {
         Ok(())
     }
 
+    /// Every word with its pronunciations, in no particular order.
+    pub fn words(&self) -> impl Iterator<Item = (&str, &[Pron])> {
+        self.entries.iter().map(|(w, p)| (w.as_str(), p.as_slice()))
+    }
+
+    /// Loads the common-word list (one lowercase word per line).
+    pub fn set_common_words(&mut self, text: &str) {
+        self.common = text
+            .lines()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect();
+    }
+
+    /// Whether `word` is in the common-word list (`false` when no list is loaded).
+    #[must_use]
+    pub fn is_common(&self, word: &str) -> bool {
+        self.common.contains(word)
+    }
+
     /// Whole word first, then the last hyphen component (`spec/PROSODY.md` §2).
     #[must_use]
     pub fn lookup(&self, word: &str) -> Option<&[Pron]> {
@@ -136,6 +159,7 @@ impl Lexicon {
 
 const PINNED_DICT: &str = include_str!("../lexicon/cmudict.dict");
 const PINNED_LOCK: &str = include_str!("../lexicon/lexicon.lock");
+const PINNED_COMMON: &str = include_str!("../lexicon/common-words.txt");
 
 /// `SXP-304`: the vendored lexicon does not match `lexicon.lock` (tooling error).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,20 +178,30 @@ impl fmt::Display for PinError {
     }
 }
 
-/// Checks `dict` against the `sha256 = "..."` line of `lock`.
-pub fn verify_pin(dict: &str, lock: &str) -> Result<(), PinError> {
+fn verify_hash(data: &str, lock: &str, key: &str, what: &str) -> Result<(), PinError> {
+    let prefix = format!("{key} = \"");
     let expected = lock
         .lines()
-        .find_map(|l| l.strip_prefix("sha256 = \"")?.strip_suffix('"'))
-        .ok_or_else(|| PinError("lexicon.lock has no sha256 entry".to_string()))?;
-    let found = sha256_hex(dict.as_bytes());
+        .find_map(|l| l.strip_prefix(prefix.as_str())?.strip_suffix('"'))
+        .ok_or_else(|| PinError(format!("lexicon.lock has no {key} entry")))?;
+    let found = sha256_hex(data.as_bytes());
     if found == expected {
         Ok(())
     } else {
         Err(PinError(format!(
-            "lexicon sha256 mismatch: expected {expected}, found {found}"
+            "{what} sha256 mismatch: expected {expected}, found {found}"
         )))
     }
+}
+
+/// Checks `dict` against the `sha256 = "..."` line of `lock`.
+pub fn verify_pin(dict: &str, lock: &str) -> Result<(), PinError> {
+    verify_hash(dict, lock, "sha256", "lexicon")
+}
+
+/// Checks the common-word list against the `common_words_sha256 = "..."` line of `lock`.
+pub fn verify_common_pin(list: &str, lock: &str) -> Result<(), PinError> {
+    verify_hash(list, lock, "common_words_sha256", "common-word list")
 }
 
 impl Lexicon {
@@ -176,7 +210,10 @@ impl Lexicon {
         static CELL: OnceLock<Result<Lexicon, PinError>> = OnceLock::new();
         CELL.get_or_init(|| {
             verify_pin(PINNED_DICT, PINNED_LOCK)?;
-            Lexicon::parse(PINNED_DICT).map_err(|e| PinError(e.to_string()))
+            verify_common_pin(PINNED_COMMON, PINNED_LOCK)?;
+            let mut lex = Lexicon::parse(PINNED_DICT).map_err(|e| PinError(e.to_string()))?;
+            lex.set_common_words(PINNED_COMMON);
+            Ok(lex)
         })
         .clone()
     }

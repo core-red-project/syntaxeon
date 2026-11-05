@@ -49,7 +49,7 @@ fn version_help_and_usage_errors() {
     for section in ["USAGE", "COMMANDS", "OPTIONS", "EXAMPLES"] {
         assert!(h.out.contains(section), "{section}");
     }
-    assert!(h.err.is_empty());
+    assert_eq!(h.err.len(), 0);
     // `-v` is verbose, never version: with no command it is a usage error.
     let v = exec(&["-v"], "");
     assert_eq!(v.code, 2);
@@ -73,7 +73,7 @@ fn check_accepts_a_valid_program() {
     let o = exec(&["check", "-"], GOOD);
     assert_eq!(o.code, 0);
     assert_eq!(o.out, "ok: - (1 stanza(s))\n");
-    assert!(o.err.is_empty());
+    assert_eq!(o.err.len(), 0);
     // Global flags work after the command; --quiet silences success.
     let q = exec(&["check", "-", "--quiet"], GOOD);
     assert_eq!((q.code, q.out.as_str(), q.err.as_str()), (0, "", ""));
@@ -83,7 +83,7 @@ fn check_accepts_a_valid_program() {
 fn check_reports_a_rhyme_failure_on_stderr() {
     let o = exec(&["check", "-"], BAD_RHYME);
     assert_eq!(o.code, 1);
-    assert!(o.out.is_empty(), "stdout carries data only");
+    assert_eq!(o.out.len(), 0, "stdout carries data only");
     assert!(o.err.contains("error[SXP-202]"));
     assert!(o.err.contains("The verse hath failed to rhyme."));
     assert!(o.err.contains("-:2") || o.err.contains("-:1"));
@@ -111,7 +111,7 @@ fn phases_stop_at_the_first_failure() {
 fn json_output() {
     let bad = exec(&["check", "--json", "-"], BAD_RHYME);
     assert_eq!(bad.code, 1);
-    assert!(bad.err.is_empty());
+    assert_eq!(bad.err.len(), 0);
     assert!(
         bad.out
             .starts_with("{\"file\":\"-\",\"ok\":false,\"phase\":\"prosody\"")
@@ -243,7 +243,7 @@ fn run_executes_a_valid_program() {
     let o = exec(&["run", &path], "");
     assert_eq!(o.code, 0, "{}", o.err);
     assert_eq!(o.out, "Hello again10\nAmen");
-    assert!(o.err.is_empty());
+    assert_eq!(o.err.len(), 0);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -252,7 +252,7 @@ fn run_refuses_a_program_that_does_not_rhyme() {
     let path = temp_program("bad", BAD_RHYME);
     let o = exec(&["run", &path], "");
     assert_eq!(o.code, 1);
-    assert!(o.out.is_empty(), "nothing runs when the program is invalid");
+    assert_eq!(o.out.len(), 0, "nothing runs when the program is invalid");
     assert!(o.err.contains("SXP-202"));
     std::fs::remove_file(path).unwrap();
 }
@@ -325,4 +325,92 @@ fn every_shipped_program_passes_check() {
         let o = exec(&["check", &path.to_string_lossy()], "");
         assert_eq!(o.code, 0, "{}: {}", path.display(), o.err);
     }
+}
+
+#[test]
+fn shipped_programs_print_what_they_promise() {
+    let fizz = "1\n2\nFizz again\n4\nBuzz, say when\nFizz again\n7\n8\nFizz again\nBuzz, say when\n11\nFizz again\n13\n14\nFizzBuzz, amen\nSing it, in rhymes\n";
+    let cases = [
+        ("hello", "", "Hello again10\nAmen"),
+        ("counting", "", "dingsing\ndingsing\ndingsing\n"),
+        ("twice", "", "20\n"),
+        ("echo", "one\ntwo\n", "one\ntwo\nbird"),
+        (
+            "powers",
+            "",
+            "4\n8\n16\n32\n64\n128\nRest a while\n100\nAmen",
+        ),
+        ("fizzbuzz", "", fizz),
+        ("gcd", "", "6\n25\nStill alive"),
+        (
+            "greeter",
+            "Ada\nLovelace\n",
+            "Hello, AdaLovelace\nEach letter is a hero\nA\nd\na\nRest, absurd",
+        ),
+    ];
+    for (name, input, want) in cases {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../examples/{name}.sxe"));
+        let o = exec(&["run", &path.to_string_lossy()], input);
+        assert_eq!(o.code, 0, "{name}: {}", o.err);
+        assert_eq!(o.out, want, "{name}");
+    }
+}
+
+#[test]
+fn rhymes_lists_partners_one_per_line() {
+    let o = exec(&["rhymes", "THEN", "--limit", "5"], "");
+    assert_eq!(o.code, 0, "{}", o.err);
+    let words: Vec<&str> = o.out.lines().collect();
+    assert_eq!(words.len(), 5);
+    assert!(!words.contains(&"then"), "a word is not its own rhyme");
+    assert!(o.err.contains("showing 5 of"), "{}", o.err);
+    // -q silences the note; the default list skips abbreviations, --all keeps them.
+    assert_eq!(exec(&["rhymes", "then", "--limit", "5", "-q"], "").err, "");
+    assert!(
+        !exec(&["rhymes", "then", "--limit", "0"], "")
+            .out
+            .lines()
+            .any(|w| w == "cnn")
+    );
+    assert!(
+        exec(&["rhymes", "then", "--all", "--limit=0"], "")
+            .out
+            .lines()
+            .any(|w| w == "cnn")
+    );
+}
+
+#[test]
+fn rhymes_json_and_errors() {
+    let o = exec(&["rhymes", "light", "--json", "--limit", "3"], "");
+    assert_eq!(o.code, 0);
+    assert!(
+        o.out
+            .starts_with("{\"word\":\"light\",\"tail\":\"AY T\",\"total\":"),
+        "{}",
+        o.out
+    );
+    assert!(
+        o.out.contains("\"shown\":3") && o.out.contains("\"rhymes\":[\""),
+        "{}",
+        o.out
+    );
+    assert_eq!(o.err, "");
+    let unknown = exec(&["rhymes", "zyzzyva"], "");
+    assert_eq!(unknown.code, 1);
+    assert!(unknown.err.contains("not in the pronunciation lexicon") && unknown.out.is_empty());
+    assert_eq!(exec(&["rhymes", "then", "--limit", "x"], "").code, 2);
+    assert_eq!(exec(&["rhymes", "then", "--limit"], "").code, 2);
+    assert_eq!(exec(&["rhymes"], "").code, 2);
+}
+
+#[test]
+fn rhymes_default_list_is_common_words_only() {
+    let times = exec(&["rhymes", "times", "--limit", "0"], "").out;
+    let words: Vec<&str> = times.lines().collect();
+    assert!(words.contains(&"chimes") && words.contains(&"rhymes") && words.contains(&"dimes"));
+    assert!(!words.contains(&"imes"), "bare tokens are filtered out");
+    let then = exec(&["rhymes", "then", "--limit", "0"], "").out;
+    assert!(then.lines().any(|w| w == "men") && !then.lines().any(|w| w == "ren"));
 }

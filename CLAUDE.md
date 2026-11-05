@@ -12,7 +12,7 @@ Non-Monolithic Cargo workspace, a single language (Rust), one root `Justfile`. M
 - `crates/syntaxeon-syntax`: prose parser returning every reading of a sentence, lowering to the AST (`spec/PROSE_GRAMMAR.md`).
 - `crates/syntaxeon-check`: name resolution and type checking (`spec/SEMANTIC_CORE.md` §5).
 - `crates/syntaxeon-eval`: tree-walking evaluator (`spec/SEMANTIC_CORE.md` §6, ADR-013).
-- `crates/syntaxeon-cli`: the `syntaxeon` binary (`check`, `explain`, `ast`, `run`, completions, man).
+- `crates/syntaxeon-cli`: the `syntaxeon` binary (`check`, `explain`, `ast`, `run`, `rhymes`, completions, man).
 
 ## Standard Command Surface
 Use `just` for every common task:
@@ -43,7 +43,7 @@ just clean         # Remove build artifacts
 | Release process and asset names | `docs/RELEASING.md` |
 | Benchmark baselines | `docs/benchmarks.md`; fixture in `benches/` |
 | Compiler, runtime and CLI code | `crates/<crate>/src/`; integration tests in `crates/<crate>/tests/` |
-| Pronunciation lexicon and its pin | `crates/syntaxeon-lexicon/lexicon/` (`cmudict.dict` + `lexicon.lock`) |
+| Pronunciation lexicon, common-word list and their pins | `crates/syntaxeon-lexicon/lexicon/` (`cmudict.dict`, `common-words.txt`, `lexicon.lock`); never edit by hand |
 | Example programs | `examples/` (every file must pass `syntaxeon check`; a test enforces it) |
 | Git hooks and commit-message checks | `.githooks/`, `scripts/` |
 | Release packaging | `scripts/package.sh` |
@@ -66,6 +66,9 @@ Phases run in that order (prosody after semantics) and checking stops at the fir
 - Comments are proportional and timeless; cite spec sections instead of repeating them. A deliberate shortcut is marked `shortcut: <limit>, <when to upgrade>`.
 - Names: English, one term per concept (see `docs/glossary.md`), snake_case files and modules, no `mod.rs`.
 - Internal crate versions are declared once in `[workspace.dependencies]` and must equal the workspace version.
+
+## Testing
+`just test` runs unit, integration and fuzz tests with small, fixed iteration counts. To search harder: `SYNTAXEON_FUZZ_ITERS=20000 SYNTAXEON_FUZZ_SEED=7 cargo test --release -p syntaxeon-cli --test fuzz_programs` (whole programs against a reference interpreter) or `-p syntaxeon-syntax --test fuzz` (sentences and headers) or `-p syntaxeon-lexicon --test fuzz_rhyme` (rhyme and stanzas against an oracle); `cargo test --release … explore_ -- --ignored --nocapture` prints what a run covers. A failing seed is printed with its program; keep it as a regression test.
 
 ## Commit Conventions
 Conventional Commits, enforced by the `commit-msg` hook and by CI: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.

@@ -1,0 +1,19 @@
+Thus begins the tale of hero:
+Let the chimes, a whole number, become zero.
+Do this 15 times:
+Let the chimes now be the sum of one and the chimes.
+If the remainder of the chimes and 15 is zero, then:
+Proclaim "FizzBuzz, amen".
+Otherwise:
+If the remainder of the chimes and 3 is zero, then:
+Proclaim "Fizz again".
+Otherwise:
+If the remainder of the chimes and 5 is zero, then:
+Proclaim "Buzz, say when".
+Otherwise:
+Proclaim the text of the chimes.
+So be it.
+So be it.
+So be it.
+So be it.
+Proclaim "Sing it, in rhymes".
