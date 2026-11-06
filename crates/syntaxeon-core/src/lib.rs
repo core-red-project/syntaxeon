@@ -23,7 +23,7 @@ pub struct Program {
     pub stanzas: Vec<Stanza>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Stanza {
     pub id: usize,
     pub title: Name,
@@ -31,6 +31,8 @@ pub struct Stanza {
     pub ret: Type,
     pub body: Vec<Stmt>,
     pub line: usize,
+    /// The stanza header.
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,10 +41,15 @@ pub struct Param {
     pub ty: Type,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub line: usize,
+    /// The whole sentence (or block header) the statement was read from.
+    pub span: Span,
+    /// What an error about the statement itself is about: the declared name of a `Decl`, the
+    /// target of an `Assign`; otherwise the same as `span`. Empty when built without a source.
+    pub focus: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -216,4 +223,30 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+}
+
+// `Debug` shows the structure and the line, not the byte spans, so the `ast` dump is the same
+// whatever the whitespace of the source (spans are in the fields for tools that want them).
+#[allow(clippy::missing_fields_in_debug)] // the spans are left out on purpose (see above)
+impl std::fmt::Debug for Stmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stmt")
+            .field("kind", &self.kind)
+            .field("line", &self.line)
+            .finish()
+    }
+}
+
+#[allow(clippy::missing_fields_in_debug)] // the span is left out on purpose (see above)
+impl std::fmt::Debug for Stanza {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stanza")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("params", &self.params)
+            .field("ret", &self.ret)
+            .field("body", &self.body)
+            .field("line", &self.line)
+            .finish()
+    }
 }

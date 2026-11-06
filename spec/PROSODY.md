@@ -17,8 +17,10 @@ but the lexicon already carries stress so v2 needs no data change.
 ## 1. Determinism contract
 
 1. The compiler uses **only** the vendored lexicon (§2) plus in-file
-   pragmas (§3). No OS speech API, no network, no locale, no G2P model.
-2. The rhyme function (§4) is pure: `(wordA, wordB, lexicon) → bool`.
+   pragmas (§3) and the project's `rhythm.toml` (§12), which lives next to
+   the code and is versioned with it. No OS speech API, no network, no
+   locale, no G2P model.
+2. The rhyme function (§4) is pure: `(wordA, wordB, lexicon, rules) → bool`.
 3. A conforming implementation must pass the vectors in §9 on the pinned
    snapshot. A verdict that differs between two conforming implementations
    is a spec bug.
@@ -44,7 +46,7 @@ but the lexicon already carries stress so v2 needs no data change.
 - **Multiple pronunciations**: an entry may list several (`word`, `word(2)`).
   All are kept.
 
-A second pinned file, `common-words.txt` (ESDB size 35, US, lowercase, 38 658 words), is **not** part of the rhyme rule: it only decides which words `syntaxeon rhymes` suggests by default. Its pin and notice are recorded in the same `lexicon.lock`, and a mismatch is also `SXP-304`.
+A second pinned file, `common-words.txt` (ESDB size 35, US, lowercase, 38 658 words), is **not** part of the rhyme rule: it only decides which words `syntaxeon rhymes` suggests by default. A third pinned file, `word-tiers.txt` (SCOWL 2020.12.07 levels 10 and 20, derivation recorded in the lock), orders those suggestions: tier 10, tier 20, other common words, then the rest, each group by length and then alphabetically. Pins and notices are recorded in the same `lexicon.lock`, and a mismatch is also `SXP-304`.
 
 Only **verse end words** are looked up (§5), so a program uses unusual
 vocabulary freely everywhere else.
@@ -83,7 +85,23 @@ Two pronunciations `p`, `q` **rhyme** iff `tail(p) = tail(q)` and
 rhyme: this excludes `night`/`knight`, `eye`/`I`, and a word with itself.)
 
 Two *words* rhyme iff **some** pronunciation of the first rhymes with
-**some** pronunciation of the second. (Existential, hence deterministic.)
+**some** pronunciation of the second, and they are not the same word.
+(Existential, hence deterministic; the exception keeps a word with several
+pronunciations from rhyming with itself.)
+
+### 4.1 Assonance
+
+Two pronunciations **assonate** iff the *vowels* of `tail(p)` and `tail(q)`
+are the same in the same order (stress ignored), whatever the consonants
+between them, and they are not an identical rhyme (equal tails **and** equal
+onsets). Perfect rhyme implies assonance, so assonance only adds rhymes:
+`men`/`bed`, `cat`/`cap` and `tender`/`member` assonate; `men`/`amen`
+(identical) and `cat`/`capital` (different vowels after the stress) do not.
+
+Assonance is **valid by default**. A project turns it off with `rhythm.toml`
+(§12), which leaves only perfect rhyme. Everything that says "rhyme" in this
+document (§7 schemes, the vectors in §9) means *perfect or, when allowed,
+assonant*; the vectors in §9 hold in both modes.
 
 ## 5. End words
 
@@ -93,10 +111,24 @@ terminal punctuation, with these rules:
 - **Verse ends inside a quoted literal** (`Speak "Hello again".`): the end
   word is the last word *inside* the quotes. A literal with no alphabetic
   word (`"…"`, `"42"`) ⇒ `SXP-203`.
-- **Verse ends in a numeral** (`ten`, `10`, `3.14`): numerals are verbalized
-  to English short-scale cardinals without `and` (`10`→`ten`, `21`→
-  `twenty-one` → `one`, `100`→`hundred`, `3.14`→…`four`); the end word is the last
-  word of that reading. Number-words are already words.
+- **Verse ends in a numeral** (`ten`, `10`, `3.14`): the end word is the last
+  word of the numeral read aloud. A whole number is read as a short-scale
+  English cardinal without `and`; let `g` be its last three digits as a
+  number:
+  - `n = 0`: `zero`;
+  - `g ≠ 0`: by `g mod 100` — `0` gives `hundred`, `1`–`19` the number word
+    (`one` … `nineteen`), a multiple of ten its tens word (`twenty` …
+    `ninety`), anything else `tens-ones` (`twenty-one`, which rhymes on `one`,
+    see the hyphen rule below);
+  - `g = 0`: the scale word of the lowest non-zero group, from `thousand` up to
+    `quintillion` (`1 000 000` ends in `million`, `1 200 000` in `thousand`).
+
+  So `10`→`ten`, `21`→`one`, `100`→`hundred`, `1025`→`five`. A decimal
+  numeral is read digit by digit after the point, so its end word is the word
+  for its last digit (`3.14`→`four`, `2.50`→`zero`). Number-words written as
+  words are already words. The rule covers every whole number up to 2⁶⁴ − 1
+  and is checked against an independent construction of the full cardinal
+  (`crates/syntaxeon-lex/tests/numerals.rs`).
 - **Verse ends in an aside or pragma**: those are excluded; the end word is
   the previous word. A verse that is only an aside is dropped (literary
   layer).
@@ -110,10 +142,22 @@ A verse is **exempt** iff it is exactly `Otherwise:` or `So be it.`
 (`PROSE_GRAMMAR.md` §8), since those carry no content. Exempt verses are
 removed before counting and checking.
 
-**Everything else counts, including headers.** `Thus begins the tale of
-men:` has end word `men`; `To double, taking … giving whole number:` has
-`number`. This closes the loophole where conditions in block headers
-(`If E, then:`) would otherwise escape the rhyme check.
+**Everything else counts, including headers.** A header rhymes on the words
+the author chose, not on its fixed closer (ADR-017):
+
+| Header | End word |
+|---|---|
+| `Thus begins the tale of men:` | the last word of the title: `men` |
+| `To double, taking n as whole number, giving whole number:` | the last word of the title, before the first comma: `double` |
+| `If the pile is ten, then:` | the last word before `, then`: `ten` |
+| `As long as the pile is less than ten, do:` | the last word before `, do`: `ten` |
+| `Do this three times:` | the last word before `times`: `three` |
+
+So a condition cannot escape the rhyme check, and no header is stuck with
+`then`, `do`, `times` or a type word. The rule looks at the verse that holds the
+closer (and, for a function header, at a title on that same line); a header
+broken over several lines rhymes on its last line as written, with the closer
+removed if it is there.
 
 ## 7. Stanza schemes (closed set)
 
@@ -126,14 +170,17 @@ Let `n` be the number of counting verses in a stanza.
 | odd ≥ 3 | couplet chain whose last three verses form one group: `AABB…CCC`, `AAA` for `n = 3` |
 
 A **scheme** assigns a letter to each verse. A stanza is valid iff there is
-a permitted scheme such that, for every letter, **every verse of that letter
-rhymes with the first verse of that letter** (§4). Letters need not be
-distinct from each other: `AAAA` satisfies `AABB`. (Rhyme with the *first*
-member, not pairwise, keeps the check linear and deterministic.)
+a permitted scheme such that, for every letter, **every two verses of that
+letter rhyme** (§4). Letters need not be distinct from each other: `AAAA`
+satisfies `AABB`. Groups never exceed three verses, so the check is at most
+three comparisons, and it is symmetric: the verdict does not depend on which
+verse comes first (ADR-016). A group therefore cannot hold an identical pair
+such as `men` and `amen`, whatever the third verse is.
 
 Invalid ⇒ `SXP-202`. The diagnostic reports the permitted scheme with the
 fewest failing groups (ties: the first in the order `AABB…`, `ABAB`, `ABBA`)
-and, for each failing verse, the expected tail and the tail found.
+and, for each failing verse (one that fails to rhyme with an earlier verse of
+its group), the expected tail and the tail found.
 
 ## 8. Diagnostics
 
@@ -146,6 +193,7 @@ and, for each failing verse, the expected tail and the tail found.
 | 302 | lexicon | malformed pronunciation pragma |
 | 303 | lexicon | pragma tries to redefine a lexicon word |
 | 304 | tooling | lexicon file does not match `lexicon.lock` |
+| 305 | tooling | `rhythm.toml` is unreadable or malformed |
 
 Voice (renderer over the structure; `--json` emits only fields):
 
@@ -202,19 +250,30 @@ Consonants: `B CH D DH F G HH JH K L M N NG P R S SH T TH V W Y Z ZH`.
 
 ## 11. Known gaps and open items
 
-- **Pairwise vs first-member grouping** (§7). First-member is simple but
-  asymmetric: a stanza can pass or fail depending on which verse leads.
-  Leaning: keep, and revisit if real programs hit it.
-- **Rhyme quality**: only perfect rhyme. No assonance, no slant rhyme.
-  Multi-syllable "feminine" rhyme works only through the single stressed
-  vowel's tail, so `fire`/`higher` rhyme, but `ending`/`bending` rhyme only
-  by accident of the dictionary's stress marks.
+- **Rhyme quality**: perfect rhyme and assonance (§4.1). Consonance, slant rhyme by final consonants and rhyme across a different number of syllables are not accepted. Feminine (multi-syllable) rhyme is covered, because the tail runs from the last primary-stressed vowel to the end of the word: `ending`/`bending`, `tender`/`fender` and `flower`/`power` rhyme (vectors in `tests/prosody.rs`). Its one weakness is that it relies on the dictionary's stress marks.
 - **Cost of constraint**: every counting verse ends a rhyme group. Block
   closers are exempt but headers are not, so deep nesting forces real
-  poetry. Whether that is the intended difficulty is the main language-design
-  question for the vertical slice.
+  poetry. Headers no longer end in fixed words (ADR-017), which removed the
+  structural dead ends measured in `docs/AUDIT.md` §4; how hard the poetry is
+  now depends on the author's choice of names and numbers.
 - No locale/dialect support; American pronunciations only (CMUdict).
-- Verbalization of large numerals and exotic scripts is specified by
-  example, not by a complete algorithm; the implementation must supply a
-  test table.
+- Exotic scripts and non-ASCII digits are not verbalized (they are lexical errors).
 - Meter/stress/alliteration: reserved for v2+, not specified.
+
+## 12. Project rules (`rhythm.toml`)
+
+The strictness of rhyme is a property of the project, not of the machine. A
+file named `rhythm.toml` in the directory of the source file, or in the nearest
+parent that has one, sets it; without a file the defaults apply. Standard input
+uses the current directory.
+
+```toml
+[rhyme]
+assonance = false   # default true; false makes only perfect rhyme valid
+```
+
+Only the `[rhyme]` section and the key `assonance` (a boolean) exist. Anything
+else, an unknown key, a wrong value or a key before its header, is `SXP-305`
+with the file and line, so a typo cannot silently loosen or tighten the rules.
+`check`, `explain`, `run` and `fmt` all read it; `syntaxeon rhymes --near` lists
+assonant partners after the perfect ones, and nothing when assonance is off.

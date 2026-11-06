@@ -1,6 +1,6 @@
 # ADR-013: v0 executes the canonical AST with a tree-walking evaluator
 
-Status: **accepted** (2026-11-05); partially supersedes ADR-003
+Status: **accepted** (2026-11-05); partially supersedes ADR-003; the IR and VM it deferred came with ADR-021, and this evaluator is now the reference
 
 ## Context
 

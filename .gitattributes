@@ -24,6 +24,7 @@ Justfile text eol=lf
 # The pinned lexicon and word list are verified by sha256: their bytes must never be rewritten
 *.dict -text -diff linguist-generated
 common-words.txt -text -diff linguist-generated
+word-tiers.txt -text -diff linguist-generated
 
 # Lockfiles are generated
 *.lock text eol=lf linguist-generated

@@ -464,3 +464,60 @@ fn preferred_spellings_respell_within_one_class_only() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn words_that_start_a_prefix_form_can_still_name_things() {
+    // `the sum` is a variable unless `of` follows; `the sum of …` stays the prefix form.
+    let [StmtKind::Decl { name, .. }] = &body("Let the sum, a whole number, become ten.")[..]
+    else {
+        panic!("not a declaration");
+    };
+    assert_eq!(name, "sum");
+    for src in [
+        "Let the length now be the length of the text.",
+        "Let the sum total now be the sum of the sum total and one.",
+        "Proclaim the text of the text.",
+        "Let the product now be the product of the quotient and the remainder.",
+        "Let the whole, a whole number, become the whole number of the fraction.",
+        "Let the letter now be the letter \"x\".",
+        "Let item ten of the length now be the negation of the negation.",
+    ] {
+        let (_, codes) = parse(&format!("Thus begins the tale:\n{src}\n"));
+        assert!(codes.is_empty(), "{src}: {codes:?}");
+    }
+    // The prefix reading wins where `of` follows, even for a name that would fit.
+    let [StmtKind::Assign { value, .. }] = &body("Let the pile now be the sum of one and two.")[..]
+    else {
+        panic!("not an assignment");
+    };
+    assert!(matches!(
+        &value.kind,
+        syntaxeon_core::ExprKind::Binary(BinOp::Add, _, _)
+    ));
+}
+
+#[test]
+fn the_primitives_lower_to_builtin_calls() {
+    use syntaxeon_core::ExprKind::Call;
+    let init = |src: &str| match &body(src)[..] {
+        [StmtKind::Decl { init, .. }] => init.kind.clone(),
+        other => panic!("{src}: {other:?}"),
+    };
+    let call = |name: &str, args: Vec<Expr>| Call(name.into(), args);
+    assert_eq!(
+        init("Let the n, a whole number, become the code of the letter \"a\"."),
+        call("to_code", vec![Expr::Char('a')])
+    );
+    assert_eq!(
+        init("Let the c, a letter, become the letter with code 97."),
+        call("to_letter", vec![Expr::Int(97)])
+    );
+    assert_eq!(
+        init("Let the b, a truth, become there is more to hear."),
+        call("has_input", vec![])
+    );
+    assert_eq!(
+        init("Let the b, a truth, become \"12\" reads as a whole number."),
+        call("reads_as_integer", vec![Expr::Str("12".into())])
+    );
+}

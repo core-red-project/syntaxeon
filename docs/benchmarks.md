@@ -22,5 +22,6 @@ Recorded with the exact command above on release builds (`just bench`, hyperfine
 | 2026-11-06 | Apple M4 Pro, 24 GiB, macOS 26.6 | `syntaxeon --version` | 2.0 ms ± 0.3 | 1.6 MiB |
 | 2026-11-06 | Apple M4 Pro, 24 GiB, macOS 26.6 | `syntaxeon check benches/fixture.sxe` | 53.6 ms ± 1.3 | 72.3 MiB |
 | 2026-11-06 | Apple M4 Pro, 24 GiB, macOS 26.6 | `syntaxeon run benches/fixture.sxe` | 105.0 ms ± 2.3 | 72.3 MiB |
+| 2026-11-06 | Apple M4 Pro, 24 GiB, macOS 26.6 | `syntaxeon run benches/fixture.sxe` (VM, ADR-021) | 97.5 ms ± 2.0 | 72.4 MiB |
 
 `check` is dominated by building the pronunciation lexicon (about 135 000 entries), hence the 72 MiB; `--version` does not touch it. A release that is more than 10 % slower than the previous row needs a note in the changelog.

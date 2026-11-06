@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use syntaxeon_check::check;
-use syntaxeon_eval::run;
+use syntaxeon_eval::run_vm as run;
 use syntaxeon_lex::lexer::lex;
 use syntaxeon_lex::literary::stanzas;
 use syntaxeon_syntax::parse_program;
@@ -648,6 +648,11 @@ type Outcome = (String, Option<&'static str>);
 type Diag = (&'static str, usize);
 
 fn pipeline(src: &str) -> Result<Outcome, Vec<Diag>> {
+    pipeline_with(src, b"")
+}
+
+/// Like [`pipeline`], with `input` on standard input (what `hear` reads).
+fn pipeline_with(src: &str, input: &[u8]) -> Result<Outcome, Vec<Diag>> {
     let lexed = lex(src);
     let verses = stanzas(&lexed);
     let (program, parse) = parse_program(&lexed, &verses);
@@ -667,7 +672,7 @@ fn pipeline(src: &str) -> Result<Outcome, Vec<Diag>> {
     let r = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(64 << 20)
-            .spawn_scoped(s, || run(&program, &mut &b""[..], &mut out))
+            .spawn_scoped(s, || run(&program, &mut &input[..], &mut out))
             .unwrap()
             .join()
             .unwrap()
@@ -969,14 +974,19 @@ mod oracle {
         t.trim_end_matches(char::is_numeric).to_string()
     }
 
-    /// (tail without stress digits, onset).
-    pub fn split(p: &[String]) -> Option<(Vec<String>, Option<String>)> {
+    /// (tail without stress digits, onset, vowels of the tail).
+    pub fn split(p: &[String]) -> Option<(Vec<String>, Option<String>, Vec<String>)> {
         let ends = |d: char| p.iter().rposition(|t| t.ends_with(d));
         let idx = ends('1')
             .or_else(|| ends('2'))
             .or_else(|| p.iter().rposition(|t| t.ends_with(char::is_numeric)))?;
         let tail = p[idx..].iter().map(|t| bare(t)).collect();
-        Some((tail, idx.checked_sub(1).map(|i| bare(&p[i]))))
+        let vowels = p[idx..]
+            .iter()
+            .filter(|t| t.ends_with(char::is_numeric))
+            .map(|t| bare(t))
+            .collect();
+        Some((tail, idx.checked_sub(1).map(|i| bare(&p[i])), vowels))
     }
 
     /// Hyphenated words rhyme on their last component (§5).
@@ -984,14 +994,20 @@ mod oracle {
         w.rsplit('-').next().unwrap_or(w)
     }
 
-    pub fn rhyme(d: &Dict, a: &str, b: &str) -> Option<bool> {
+    pub fn rhyme(d: &Dict, a: &str, b: &str, assonance: bool) -> Option<bool> {
         let (pa, pb) = (d.get(key(a))?, d.get(key(b))?);
-        Some(pa.iter().any(|x| {
-            pb.iter().any(|y| match (split(x), split(y)) {
-                (Some((tx, ox)), Some((ty, oy))) => tx == ty && ox != oy,
-                _ => false,
-            })
-        }))
+        Some(
+            a != b
+                && pa.iter().any(|x| {
+                    pb.iter().any(|y| match (split(x), split(y)) {
+                        (Some((tx, ox, vx)), Some((ty, oy, vy))) => {
+                            let identical = tx == ty && ox == oy;
+                            (tx == ty && !identical) || (assonance && !identical && vx == vy)
+                        }
+                        _ => false,
+                    })
+                }),
+        )
     }
 
     /// Couplet chain, with the last three verses forming one group when `n` is odd.
@@ -1011,11 +1027,12 @@ mod oracle {
     }
 
     /// `None` when a word is unknown (the crate must report `SXP-301`).
-    pub fn stanza_ok(d: &Dict, words: &[&str]) -> bool {
+    pub fn stanza_ok(d: &Dict, words: &[&str], assonance: bool) -> bool {
         schemes(words.len()).iter().any(|s| {
-            s.iter().enumerate().all(|(i, g)| {
-                let first = s.iter().position(|x| x == g).unwrap();
-                first == i || rhyme(d, words[first], words[i]) == Some(true)
+            // Every pair inside a group rhymes.
+            (0..s.len()).all(|i| {
+                (0..i)
+                    .all(|j| s[j] != s[i] || rhyme(d, words[j], words[i], assonance) == Some(true))
             })
         })
     }
@@ -1081,7 +1098,7 @@ fn steer(src: &str, dict: &oracle::Dict, rng: &mut Rng) -> String {
                         Some(p) => p.split(' ').map(str::to_string).collect(),
                         None => dict.get(oracle::key(w))?.first()?.clone(),
                     };
-                    let (tail, onset) = oracle::split(&toks)?;
+                    let (tail, onset, _) = oracle::split(&toks)?;
                     let idx = toks.len() - tail.len();
                     Some((toks[idx..].join(" "), onset.unwrap_or_default()))
                 };
@@ -1121,9 +1138,14 @@ fn steer(src: &str, dict: &oracle::Dict, rng: &mut Rng) -> String {
 
 /// Compares the crate's per-stanza prosody verdict with the oracle's on the same end words.
 /// Returns the (valid, invalid) stanza counts.
-fn prosody_agrees(src: &str, dict: &mut oracle::Dict, what: &str) -> (usize, usize) {
+fn prosody_agrees(
+    src: &str,
+    dict: &mut oracle::Dict,
+    assonance: bool,
+    what: &str,
+) -> (usize, usize) {
     use syntaxeon_lex::prosody;
-    use syntaxeon_lexicon::lexicon::Lexicon;
+    use syntaxeon_lexicon::lexicon::{Lexicon, RhymeRules};
     let lexed = lex(src);
     let verses = stanzas(&lexed);
     assert!(
@@ -1132,6 +1154,7 @@ fn prosody_agrees(src: &str, dict: &mut oracle::Dict, what: &str) -> (usize, usi
         lexed.diagnostics
     );
     let mut lexicon = Lexicon::pinned().unwrap();
+    lexicon.set_rhyme_rules(RhymeRules { assonance });
     let real = prosody::check(&lexed, &verses, &mut lexicon);
     // Pragma words join the oracle as ordinary pronunciations.
     for p in &lexed.pragmas {
@@ -1140,27 +1163,36 @@ fn prosody_agrees(src: &str, dict: &mut oracle::Dict, what: &str) -> (usize, usi
             vec![p.phones.split(' ').map(str::to_string).collect()],
         );
     }
-    let failing_real: Vec<usize> = real.iter().map(|d| d.line).collect();
+    // A diagnostic points at one verse of its stanza; compare which stanzas, not which line.
+    let stanza_of = |line: usize| {
+        verses
+            .iter()
+            .position(|s| s.verses.iter().any(|v| v.line == line))
+    };
+    let failing_real: Vec<Option<usize>> = real.iter().map(|d| stanza_of(d.line)).collect();
     let (mut valid, mut invalid) = (0, 0);
     let mut failing_oracle = Vec::new();
-    for s in &verses {
+    for (index, s) in verses.iter().enumerate() {
         let words: Vec<&str> = s
             .verses
             .iter()
             .filter(|v| !v.structural)
             .map(|v| v.end_word.as_deref().unwrap())
             .collect();
-        if oracle::stanza_ok(dict, &words) {
+        if oracle::stanza_ok(dict, &words, assonance) {
             valid += 1;
         } else {
             invalid += 1;
-            failing_oracle.push(s.verses[0].line);
+            failing_oracle.push(Some(index));
         }
     }
     for p in &lexed.pragmas {
         dict.remove(&p.word);
     }
-    assert_eq!(failing_real, failing_oracle, "{what}\n{src}");
+    assert_eq!(
+        failing_real, failing_oracle,
+        "{what} (assonance {assonance})\n{src}"
+    );
     (valid, invalid)
 }
 
@@ -1178,7 +1210,14 @@ fn rhyme_in_generated_programs_agrees_with_the_oracle() {
             &dict,
             &mut rng,
         );
-        prosody_agrees(&src, &mut dict, &format!("seed {base} program {i}"));
+        for assonance in [false, true] {
+            prosody_agrees(
+                &src,
+                &mut dict,
+                assonance,
+                &format!("seed {base} program {i}"),
+            );
+        }
     }
 }
 
@@ -1230,12 +1269,15 @@ fn rhymed_poems_agree_with_the_oracle() {
     let (mut valid, mut invalid) = (0, 0);
     for i in 0..iters {
         let src = steer(&poem(&mut rng), &dict, &mut rng);
-        let (v, n) = prosody_agrees(&src, &mut dict, &format!("seed {base} poem {i}"));
-        valid += v;
-        invalid += n;
+        for assonance in [false, true] {
+            let (v, n) =
+                prosody_agrees(&src, &mut dict, assonance, &format!("seed {base} poem {i}"));
+            valid += v;
+            invalid += n;
+        }
     }
     assert!(
-        valid * 4 >= iters && invalid * 4 >= iters,
+        valid * 8 >= iters && invalid * 8 >= iters,
         "unbalanced: {valid} valid / {invalid} invalid"
     );
 }
@@ -1388,21 +1430,36 @@ fn fmt_keeps_rhyming_programs_valid() {
 
 // ---- strings and floats ------------------------------------------------------------------
 //
-// A second, straight-line generator over `Integer`, `Float` and `String` values with the
-// conversions between them, checked against a model of its own. Control flow is covered above.
+// A second, straight-line generator over `Integer`, `Float`, `String`, `Character` and `Boolean`
+// values with the conversions between them, `hear` and the input tests, checked against a model of
+// its own. Control flow is covered above.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ty {
     Int,
     Float,
     Text,
+    Char,
+    Bool,
 }
+
+/// What a declaration says of each type, indexed by `Ty as usize`.
+const TY_NOTES: [&str; 5] = [
+    "a whole number",
+    "a fraction",
+    "a text",
+    "a letter",
+    "a truth",
+];
+const CHARS: &[char] = &['a', 'Z', ' ', 'é', '7', '~'];
 
 #[derive(Clone, Debug, PartialEq)]
 enum Val {
     Int(i64),
     Float(f64),
     Text(String),
+    Char(char),
+    Bool(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -1419,7 +1476,24 @@ enum X {
     Trunc(Box<X>),
     /// `the fraction of`
     Frac(Box<X>),
+    /// `what is heard`
+    Hear,
+    /// `the whole number of` a text
+    ParseInt(Box<X>),
+    /// `the code of` a letter
+    Code(Box<X>),
+    /// `the letter with code`
+    ToLetter(Box<X>),
+    /// `item N of` a text
+    Index(Box<X>, Box<X>),
+    /// `there is more to hear`
+    More,
+    /// `… reads as a whole number`
+    Reads(Box<X>),
 }
+
+/// The lines of standard input still to be heard.
+type Input = std::iter::Peekable<std::vec::IntoIter<String>>;
 
 /// A declared variable: its type and its current value in the model.
 type Slot = (Ty, Option<Val>);
@@ -1441,6 +1515,17 @@ const FLOATS: &[(f64, &str)] = &[
 const TEXTS: &[&str] = &["a", "bc", "hello", "Zed", "x y", "", "tale of two"];
 
 impl Scalars {
+    /// A truth that can stand where an operand is required.
+    fn bool_operand(&mut self) -> X {
+        let vars: Vec<usize> = (0..self.vars.len())
+            .filter(|i| self.vars[*i] == Ty::Bool)
+            .collect();
+        if !vars.is_empty() && self.rng.chance(50) {
+            return X::Var(vars[self.rng.below(vars.len())]);
+        }
+        X::More
+    }
+
     fn expr(&mut self, want: Ty, depth: usize) -> X {
         let vars: Vec<usize> = (0..self.vars.len())
             .filter(|i| self.vars[*i] == want)
@@ -1449,10 +1534,23 @@ impl Scalars {
             if !vars.is_empty() && self.rng.chance(50) {
                 return X::Var(vars[self.rng.below(vars.len())]);
             }
+            if want == Ty::Text && self.rng.chance(25) {
+                return X::Hear;
+            }
+            if want == Ty::Bool && self.rng.chance(60) {
+                return X::More;
+            }
             return match want {
                 Ty::Int => {
                     let n = i64::try_from(self.rng.below(3000)).unwrap();
                     let n = if self.rng.chance(10) { i64::MAX - n } else { n };
+                    // Around the edges of what is a letter: surrogates and the end of Unicode.
+                    let edges = [0xD7FF, 0xD800, 0xDFFF, 0xE000, 0x10_FFFF, 0x11_0000];
+                    let n = if self.rng.chance(8) {
+                        edges[self.rng.below(edges.len())]
+                    } else {
+                        n
+                    };
                     X::Lit(Val::Int(n), n.to_string())
                 }
                 Ty::Float => {
@@ -1463,27 +1561,41 @@ impl Scalars {
                     let w = TEXTS[self.rng.below(TEXTS.len())];
                     X::Lit(Val::Text(w.to_string()), format!("\"{w}\""))
                 }
+                Ty::Char => {
+                    let c = CHARS[self.rng.below(CHARS.len())];
+                    X::Lit(Val::Char(c), format!("the letter \"{c}\""))
+                }
+                Ty::Bool => {
+                    let inner = self.expr(Ty::Text, 0);
+                    X::Reads(Box::new(inner))
+                }
             };
         }
         let d = depth - 1;
         let b = |x: X| Box::new(x);
-        match (want, self.rng.below(6)) {
+        match (want, self.rng.below(8)) {
             (Ty::Text, 0 | 1) => X::Arith(
                 Op::Sum,
                 b(self.expr(Ty::Text, d)),
                 b(self.expr(Ty::Text, d)),
             ),
+            (Ty::Text, 2) => X::Hear,
             (Ty::Text, _) => {
-                let from = if self.rng.chance(50) {
-                    Ty::Int
+                let from = [Ty::Int, Ty::Float, Ty::Char, Ty::Bool][self.rng.below(4)];
+                // `reads as` is not an operand, so a truth is only ever shown through a name
+                // or the question about input.
+                let arg = if from == Ty::Bool {
+                    self.bool_operand()
                 } else {
-                    Ty::Float
+                    self.expr(from, d)
                 };
-                X::ToText(b(self.expr(from, d)))
+                X::ToText(b(arg))
             }
             (Ty::Int, 0) => X::Len(b(self.expr(Ty::Text, d))),
             (Ty::Int, 1) => X::Trunc(b(self.expr(Ty::Float, d))),
             (Ty::Int, 2) => X::Neg(b(self.expr(Ty::Int, d))),
+            (Ty::Int, 3) => X::ParseInt(b(self.expr(Ty::Text, d))),
+            (Ty::Int, 4) => X::Code(b(self.expr(Ty::Char, d))),
             (Ty::Int, _) => {
                 let op = [
                     Op::Sum,
@@ -1494,6 +1606,15 @@ impl Scalars {
                 ][self.rng.below(5)];
                 X::Arith(op, b(self.expr(Ty::Int, d)), b(self.expr(Ty::Int, d)))
             }
+            (Ty::Char, 0..=3) => X::ToLetter(b(self.expr(Ty::Int, d))),
+            (Ty::Char, _) => {
+                // A small index, or a variable: mostly out of range, sometimes not.
+                let n = i64::try_from(self.rng.below(4)).unwrap();
+                let idx = X::Lit(Val::Int(n), n.to_string());
+                X::Index(b(self.expr(Ty::Text, d)), b(idx))
+            }
+            (Ty::Bool, 0..=3) => self.bool_operand(),
+            (Ty::Bool, _) => X::Reads(b(self.expr(Ty::Text, d))),
             (Ty::Float, 0) => X::Frac(b(self.expr(Ty::Int, d))),
             (Ty::Float, 1) => X::Neg(b(self.expr(Ty::Float, d))),
             (Ty::Float, _) => {
@@ -1533,28 +1654,48 @@ fn render_x(x: &X, out: &mut String) {
             out.push_str("the length of ");
             render_x(a, out);
         }
-        X::Trunc(a) => {
-            out.push_str("the whole number of ");
-            render_x(a, out);
-        }
         X::Frac(a) => {
             out.push_str("the fraction of ");
+            render_x(a, out);
+        }
+        X::Hear => out.push_str("what is heard"),
+        X::More => out.push_str("there is more to hear"),
+        X::Code(a) => {
+            out.push_str("the code of ");
+            render_x(a, out);
+        }
+        X::ToLetter(a) => {
+            out.push_str("the letter with code ");
+            render_x(a, out);
+        }
+        X::Index(text, idx) => {
+            out.push_str("item ");
+            render_x(idx, out);
+            out.push_str(" of ");
+            render_x(text, out);
+        }
+        X::Reads(a) => {
+            render_x(a, out);
+            out.push_str(" reads as a whole number");
+        }
+        X::Trunc(a) | X::ParseInt(a) => {
+            out.push_str("the whole number of ");
             render_x(a, out);
         }
     }
 }
 
 /// Model evaluation; `Err` is the runtime error code.
-fn eval_x(x: &X, env: &[Slot]) -> Result<Val, &'static str> {
+fn eval_x(x: &X, env: &[Slot], input: &mut Input) -> Result<Val, &'static str> {
     Ok(match x {
         X::Lit(v, _) => v.clone(),
         X::Var(i) => env[*i].1.clone().expect("declared before use"),
-        X::Neg(a) => match eval_x(a, env)? {
+        X::Neg(a) => match eval_x(a, env, input)? {
             Val::Int(n) => Val::Int(n.checked_neg().ok_or("SXP-501")?),
             Val::Float(f) => Val::Float(-f),
-            Val::Text(_) => unreachable!("typed"),
+            _ => unreachable!("typed"),
         },
-        X::Arith(op, a, b) => match (eval_x(a, env)?, eval_x(b, env)?) {
+        X::Arith(op, a, b) => match (eval_x(a, env, input)?, eval_x(b, env, input)?) {
             (Val::Int(p), Val::Int(q)) => Val::Int(match op {
                 Op::Sum => p.checked_add(q).ok_or("SXP-501")?,
                 Op::Difference => p.checked_sub(q).ok_or("SXP-501")?,
@@ -1574,16 +1715,18 @@ fn eval_x(x: &X, env: &[Slot]) -> Result<Val, &'static str> {
             (Val::Text(p), Val::Text(q)) => Val::Text(p + &q),
             _ => unreachable!("typed"),
         },
-        X::ToText(a) => Val::Text(match eval_x(a, env)? {
+        X::ToText(a) => Val::Text(match eval_x(a, env, input)? {
             Val::Int(n) => n.to_string(),
             Val::Float(f) => format!("{f:?}"),
+            Val::Char(c) => c.to_string(),
+            Val::Bool(b) => b.to_string(),
             Val::Text(_) => unreachable!("typed"),
         }),
-        X::Len(a) => match eval_x(a, env)? {
+        X::Len(a) => match eval_x(a, env, input)? {
             Val::Text(s) => Val::Int(i64::try_from(s.chars().count()).unwrap()),
             _ => unreachable!("typed"),
         },
-        X::Trunc(a) => match eval_x(a, env)? {
+        X::Trunc(a) => match eval_x(a, env, input)? {
             Val::Float(f)
                 if f.is_nan()
                     || f >= 9_223_372_036_854_775_808.0
@@ -1595,7 +1738,40 @@ fn eval_x(x: &X, env: &[Slot]) -> Result<Val, &'static str> {
             Val::Float(f) => Val::Int(f.trunc() as i64),
             _ => unreachable!("typed"),
         },
-        X::Frac(a) => match eval_x(a, env)? {
+        X::Hear => Val::Text(input.next().ok_or("SXP-505")?),
+        X::ParseInt(a) => match eval_x(a, env, input)? {
+            Val::Text(s) => Val::Int(parse_int(&s).ok_or("SXP-506")?),
+            _ => unreachable!("typed"),
+        },
+        X::More => Val::Bool(input.peek().is_some()),
+        X::Code(a) => match eval_x(a, env, input)? {
+            Val::Char(c) => Val::Int(i64::from(u32::from(c))),
+            _ => unreachable!("typed"),
+        },
+        X::ToLetter(a) => match eval_x(a, env, input)? {
+            // A letter is a Unicode scalar value: no surrogates, nothing past U+10FFFF.
+            Val::Int(n) => Val::Char(
+                u32::try_from(n)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or("SXP-506")?,
+            ),
+            _ => unreachable!("typed"),
+        },
+        X::Index(text, idx) => match (eval_x(text, env, input)?, eval_x(idx, env, input)?) {
+            (Val::Text(s), Val::Int(n)) => Val::Char(
+                usize::try_from(n)
+                    .ok()
+                    .and_then(|k| s.chars().nth(k))
+                    .ok_or("SXP-503")?,
+            ),
+            _ => unreachable!("typed"),
+        },
+        X::Reads(a) => match eval_x(a, env, input)? {
+            Val::Text(s) => Val::Bool(parse_int(&s).is_some()),
+            _ => unreachable!("typed"),
+        },
+        X::Frac(a) => match eval_x(a, env, input)? {
             #[allow(clippy::cast_precision_loss)] // the language rounds the same way
             Val::Int(n) => Val::Float(n as f64),
             _ => unreachable!("typed"),
@@ -1603,36 +1779,103 @@ fn eval_x(x: &X, env: &[Slot]) -> Result<Val, &'static str> {
     })
 }
 
-/// Program text and the model's `(output, error)`.
-fn scalar_program(seed: u64) -> (String, Outcome) {
+/// A whole number as `to_integer` reads it from text: an optional sign, then ASCII digits and
+/// nothing else (no spaces, no separators), within `Integer`'s range (`SEMANTIC_CORE.md` §8).
+fn parse_int(s: &str) -> Option<i64> {
+    let (neg, digits) = match s.as_bytes().first()? {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut n: i128 = 0;
+    for b in digits.bytes() {
+        n = n * 10 + i128::from(b - b'0');
+        if n > i128::from(i64::MAX) + 1 {
+            return None;
+        }
+    }
+    i64::try_from(if neg { -n } else { n }).ok()
+}
+
+const INPUT_LINES: &[&str] = &[
+    "42",
+    "-7",
+    "0",
+    "+3",
+    "007",
+    "abc",
+    "",
+    "1.5",
+    " 5",
+    "5 ",
+    "9223372036854775807",
+    "9223372036854775808",
+    "-9223372036854775808",
+    "-9223372036854775809",
+    "x y",
+    "tale",
+    "+",
+    "-",
+];
+
+/// Lines of standard input and its bytes: random terminators (`\n` or `\r\n`), the last line
+/// sometimes left unterminated (never empty then, which would just be the end of input).
+fn input_for(rng: &mut Rng) -> (Vec<String>, Vec<u8>) {
+    let n = rng.below(6);
+    let lines: Vec<String> = (0..n)
+        .map(|_| INPUT_LINES[rng.below(INPUT_LINES.len())].to_string())
+        .collect();
+    let mut bytes = String::new();
+    for (k, l) in lines.iter().enumerate() {
+        bytes.push_str(l);
+        let last = k + 1 == lines.len();
+        if last && !l.is_empty() && rng.chance(30) {
+            continue;
+        }
+        bytes.push_str(["\n", "\r\n"][rng.below(2)]);
+    }
+    (lines, bytes.into_bytes())
+}
+
+/// Program text, its standard input, and the model's `(output, error)`.
+fn scalar_program(seed: u64) -> (String, Vec<u8>, Outcome) {
     let mut g = Scalars {
         rng: Rng(seed | 1),
         vars: vec![],
     };
     let mut env: Vec<Slot> = Vec::new();
+    let (lines, stdin) = input_for(&mut g.rng);
+    let mut input: Input = lines.into_iter().peekable();
     let mut src = String::from("Thus begins the tale:\n");
     let mut out = String::new();
     let mut failed: Option<&'static str> = None;
     for _ in 0..4 + g.rng.below(14) {
         let declare = g.vars.len() < VARS.len() && (g.vars.is_empty() || g.rng.chance(55));
         if declare {
-            let ty = [Ty::Int, Ty::Float, Ty::Text][g.rng.below(3)];
+            let ty = [Ty::Int, Ty::Float, Ty::Text, Ty::Char, Ty::Bool][g.rng.below(5)];
             let x = g.expr(ty, 3);
-            let note = ["a whole number", "a fraction", "a text"][ty as usize];
+            let note = TY_NOTES[ty as usize];
             let mut e = String::new();
             render_x(&x, &mut e);
             writeln!(src, "Let the {}, {note}, become {e}.", VARS[g.vars.len()]).unwrap();
             g.vars.push(ty);
             env.push((ty, None));
             if failed.is_none() {
-                match eval_x(&x, &env) {
+                match eval_x(&x, &env, &mut input) {
                     Ok(v) => env[g.vars.len() - 1].1 = Some(v),
                     Err(c) => failed = Some(c),
                 }
             }
         } else {
-            let ty = [Ty::Int, Ty::Float, Ty::Text][g.rng.below(3)];
-            let x = g.expr(ty, 3);
+            let ty = [Ty::Int, Ty::Float, Ty::Text, Ty::Char, Ty::Bool][g.rng.below(5)];
+            let x = if ty == Ty::Bool {
+                g.bool_operand()
+            } else {
+                g.expr(ty, 3)
+            };
             let mut e = String::new();
             render_x(&x, &mut e);
             if ty == Ty::Text {
@@ -1641,10 +1884,12 @@ fn scalar_program(seed: u64) -> (String, Outcome) {
                 writeln!(src, "Proclaim the text of {e}.").unwrap();
             }
             if failed.is_none() {
-                match eval_x(&x, &env) {
+                match eval_x(&x, &env, &mut input) {
                     Ok(Val::Text(s)) => writeln!(out, "{s}").unwrap(),
                     Ok(Val::Int(n)) => writeln!(out, "{n}").unwrap(),
                     Ok(Val::Float(f)) => writeln!(out, "{f:?}").unwrap(),
+                    Ok(Val::Char(c)) => writeln!(out, "{c}").unwrap(),
+                    Ok(Val::Bool(b)) => writeln!(out, "{b}").unwrap(),
                     Err(c) => failed = Some(c),
                 }
             }
@@ -1653,28 +1898,41 @@ fn scalar_program(seed: u64) -> (String, Outcome) {
             break;
         }
     }
-    (src, (out, failed))
+    (src, stdin, (out, failed))
 }
 
 #[test]
 fn scalar_programs_behave_like_the_model() {
     let base = env_or("SYNTAXEON_FUZZ_SEED", 0x5CA1);
     let iters = env_or("SYNTAXEON_FUZZ_ITERS", 400);
-    let (mut errors, mut floats, mut texts) = (0, 0, 0);
+    let (mut errors, mut floats, mut texts, mut hears) = (0, 0, 0, 0);
+    let (mut codes, mut letters, mut mores, mut reads) = (0, 0, 0, 0);
     for i in 0..iters {
         let seed = mix(base, i);
-        let (src, want) = scalar_program(seed);
-        let got = pipeline(&src).unwrap_or_else(|codes| {
-            panic!("seed {seed:#x} rejected {codes:?}\n--- program\n{src}");
+        let (src, stdin, want) = scalar_program(seed);
+        let got = pipeline_with(&src, &stdin).unwrap_or_else(|codes| {
+            panic!("seed {seed:#x} rejected {codes:?}\n--- program\n{src}\n--- stdin\n{stdin:?}");
         });
-        assert_eq!(got, want, "seed {seed:#x}\n--- program\n{src}");
+        assert_eq!(
+            got, want,
+            "seed {seed:#x}\n--- program\n{src}\n--- stdin\n{stdin:?}"
+        );
+        hears += usize::from(src.contains("heard"));
         errors += usize::from(want.1.is_some());
         floats += usize::from(src.contains("fraction"));
         texts += usize::from(src.contains("a text"));
+        codes += usize::from(src.contains("the code of"));
+        letters += usize::from(src.contains("letter with code"));
+        mores += usize::from(src.contains("more to hear"));
+        reads += usize::from(src.contains("reads as a whole number"));
     }
     let n = usize::try_from(iters).unwrap();
     assert!(
-        errors * 20 >= n && floats * 4 >= n && texts * 4 >= n,
+        errors * 20 >= n && floats * 4 >= n && texts * 4 >= n && hears * 4 >= n,
         "weak coverage: {errors} errors, {floats} floats, {texts} texts of {n}"
+    );
+    assert!(
+        codes * 10 >= n && letters * 10 >= n && mores * 10 >= n && reads * 10 >= n,
+        "weak coverage of the primitives: {codes} codes, {letters} letters, {mores} mores, {reads} reads of {n}"
     );
 }

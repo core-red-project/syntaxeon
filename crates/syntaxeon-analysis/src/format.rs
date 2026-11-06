@@ -5,24 +5,25 @@
 //! agrees: the program has no diagnostics and the same AST (positions aside). A rewrite that
 //! would break a rhyme therefore never happens, whatever the grammar proposed.
 
-use syntaxeon_core::{Program, Stmt, StmtKind};
+use syntaxeon_core::{Program, Span, Stmt, StmtKind};
 use syntaxeon_lex::Diagnostic;
+use syntaxeon_lexicon::lexicon::RhymeRules;
 use syntaxeon_syntax::preferred_spellings;
 
-use crate::pipeline::{Analysis, analyze};
+use crate::{Analysis, analyze};
 
 /// Rewrites can enable one another through rhyme, so repeat until nothing changes.
 const MAX_PASSES: usize = 8;
 
 /// The formatted source, or the diagnostics that stop `fmt` (it only formats programs that
 /// parse and type-check).
-pub fn format(src: &str) -> Result<String, Vec<Diagnostic>> {
-    let first = analyze(src, &mut |_| {});
+pub fn format(src: &str, rules: RhymeRules) -> Result<String, Vec<Diagnostic>> {
+    let first = analyze(src, rules, &mut |_| {});
     if matches!(first.failed_phase, Some("syntax" | "semantics")) {
         return Err(first.diagnostics);
     }
     let mut text = whitespace(src);
-    let base = analyze(&text, &mut |_| {});
+    let base = analyze(&text, rules, &mut |_| {});
     // Whitespace never changes meaning or rhyme; if it somehow did, leave the file alone.
     let codes = |a: &Analysis| a.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>();
     if codes(&base) != codes(&first) || shape(&base.program) != shape(&first.program) {
@@ -45,7 +46,7 @@ pub fn format(src: &str) -> Result<String, Vec<Diagnostic>> {
                 let mut trial_lines = lines.clone();
                 trial_lines.splice(i..=end, [candidate]);
                 let trial = trial_lines.join("\n") + "\n";
-                let a = analyze(&trial, &mut |_| {});
+                let a = analyze(&trial, rules, &mut |_| {});
                 if a.diagnostics.is_empty() && shape(&a.program) == want {
                     lines = trial_lines;
                     changed = true;
@@ -130,6 +131,8 @@ fn shape(p: &Program) -> Program {
     fn strip(body: &mut [Stmt]) {
         for s in body {
             s.line = 0;
+            s.span = Span::default();
+            s.focus = Span::default();
             match &mut s.kind {
                 StmtKind::If {
                     then, otherwise, ..
@@ -147,6 +150,7 @@ fn shape(p: &Program) -> Program {
     let mut p = p.clone();
     for s in &mut p.stanzas {
         s.line = 0;
+        s.span = Span::default();
         strip(&mut s.body);
     }
     p

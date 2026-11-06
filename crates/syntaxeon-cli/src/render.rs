@@ -7,8 +7,8 @@ use syntaxeon_lex::Diagnostic;
 use syntaxeon_lexicon::rhyme::tail_string;
 use syntaxeon_lexicon::scheme::{StanzaError, find_scheme};
 
-use crate::pipeline::{Analysis, category, headline};
 use crate::style::Style;
+use syntaxeon_analysis::{Analysis, category, headline};
 
 /// 1-based (line, column) of byte offset `at` in `src`, with the text of that line.
 fn locate(src: &str, at: usize) -> Option<(usize, usize, &str)> {

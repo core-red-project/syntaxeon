@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 
+use crate::Span;
 use crate::lexer::{Lexed, Tok, Token};
 
 /// `SXP-203`: the verse has no extractable end word.
@@ -14,6 +15,10 @@ pub struct Verse {
     /// Indices into `Lexed::tokens`.
     pub tokens: Range<usize>,
     pub end_word: Result<String, NoEndWord>,
+    /// The token the end word comes from, so an error can point at it.
+    pub end_span: Option<Span>,
+    /// The words of the verse, without any aside or the punctuation that ends it.
+    pub span: Span,
     /// Exactly `Otherwise:` or `So be it.` — exempt from rhyme (`spec/PROSODY.md` §6).
     pub structural: bool,
 }
@@ -44,10 +49,21 @@ pub fn stanzas(lexed: &Lexed) -> Vec<Stanza> {
             }
         } else if j > start {
             let toks = &lexed.tokens[start..j];
+            let (end_word, end_span) = end_word(toks);
             current.push(Verse {
                 line,
                 tokens: start..j,
-                end_word: end_word(toks),
+                end_word,
+                end_span,
+                // The words, not the punctuation that ends the verse.
+                span: Span {
+                    start: toks[0].span.start,
+                    end: toks
+                        .iter()
+                        .rev()
+                        .find(|t| !matches!(t.tok, Tok::Punct(_)))
+                        .map_or(toks[toks.len() - 1].span.end, |t| t.span.end),
+                },
                 structural: is_structural(toks),
             });
         }
@@ -72,26 +88,54 @@ fn last_component(word: &str) -> String {
     word.rsplit('-').next().unwrap_or(word).to_string()
 }
 
-fn end_word(toks: &[Token]) -> Result<String, NoEndWord> {
-    let last = toks
-        .iter()
-        .rev()
-        .find(|t| !matches!(t.tok, Tok::Punct(_)))
-        .ok_or(NoEndWord)?;
-    match &last.tok {
+/// The tokens whose last word is the verse's end word. A header does not rhyme on its fixed
+/// closer (`, then`, `, do`, `times`) but on the words before it, and a one-line function header
+/// rhymes on its title (`spec/PROSODY.md` §6); everything else is the verse as written.
+fn rhyming_part(toks: &[Token]) -> &[Token] {
+    let n = toks.len();
+    if !matches!(toks.last().map(|t| &t.tok), Some(Tok::Punct(':'))) {
+        return toks;
+    }
+    let body = &toks[..n - 1];
+    let is = |t: &Token, w: &str| matches!(&t.tok, Tok::Word(x) if x == w);
+    let comma = |t: &Token| matches!(t.tok, Tok::Punct(','));
+    if let [.., c, w] = body
+        && comma(c)
+        && (is(w, "then") || is(w, "do"))
+    {
+        return &body[..body.len() - 2];
+    }
+    if let [.., w] = body
+        && is(w, "times")
+    {
+        return &body[..body.len() - 1];
+    }
+    if body.first().is_some_and(|t| is(t, "to")) {
+        let title_end = body.iter().position(comma).unwrap_or(body.len());
+        return &body[1..title_end];
+    }
+    toks
+}
+
+/// The end word of a verse and the token it comes from (`None` when there is no word).
+fn end_word(toks: &[Token]) -> (Result<String, NoEndWord>, Option<Span>) {
+    let toks = rhyming_part(toks);
+    let Some(last) = toks.iter().rev().find(|t| !matches!(t.tok, Tok::Punct(_))) else {
+        return (Err(NoEndWord), None);
+    };
+    let word = match &last.tok {
         Tok::Word(w) => Ok(last_component(w)),
         Tok::Int(n) => Ok(last_component(&cardinal_last_word(n.unsigned_abs()))),
-        Tok::Float { text, .. } => {
-            let digit = text
-                .chars()
-                .last()
-                .and_then(|c| c.to_digit(10))
-                .ok_or(NoEndWord)?;
-            Ok(ONES[digit as usize].to_string())
-        }
+        Tok::Float { text, .. } => text
+            .chars()
+            .last()
+            .and_then(|c| c.to_digit(10))
+            .map(|digit| ONES[digit as usize].to_string())
+            .ok_or(NoEndWord),
         Tok::Str(s) => last_word_in(s).ok_or(NoEndWord),
         Tok::Punct(_) => Err(NoEndWord),
-    }
+    };
+    (word, Some(last.span))
 }
 
 /// Last alphabetic word inside quoted text.

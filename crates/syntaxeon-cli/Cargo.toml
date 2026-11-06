@@ -17,6 +17,7 @@ name = "syntaxeon"
 path = "src/main.rs"
 
 [dependencies]
+syntaxeon-analysis.workspace = true
 syntaxeon-check.workspace = true
 syntaxeon-core.workspace = true
 syntaxeon-eval.workspace = true

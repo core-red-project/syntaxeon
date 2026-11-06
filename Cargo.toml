@@ -15,12 +15,18 @@ keywords = ["esoteric", "programming-language", "rhyme", "poetry", "interpreter"
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
+syntaxeon-analysis = { path = "crates/syntaxeon-analysis", version = "0.0.1" }
 syntaxeon-check = { path = "crates/syntaxeon-check", version = "0.0.1" }
 syntaxeon-core = { path = "crates/syntaxeon-core", version = "0.0.1" }
 syntaxeon-eval = { path = "crates/syntaxeon-eval", version = "0.0.1" }
 syntaxeon-lex = { path = "crates/syntaxeon-lex", version = "0.0.1" }
 syntaxeon-lexicon = { path = "crates/syntaxeon-lexicon", version = "0.0.1" }
 syntaxeon-syntax = { path = "crates/syntaxeon-syntax", version = "0.0.1" }
+
+# External, used only by the language server.
+lsp-server = "0.10"
+lsp-types = "0.97"
+serde_json = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

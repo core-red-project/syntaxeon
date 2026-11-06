@@ -61,7 +61,28 @@ struct Gen {
     f: Features,
 }
 
-const NAMES: &[&str] = &["counter", "pile", "chimes", "slumber", "hero", "bird"];
+const NAMES: &[&str] = &[
+    "counter",
+    "pile",
+    "chimes",
+    "slumber",
+    "hero",
+    "bird",
+    // Words that start a prefix form after `the` and are still free to name a variable.
+    "sum",
+    "difference",
+    "product",
+    "quotient",
+    "remainder",
+    "text",
+    "whole",
+    "fraction",
+    "length",
+    "negation",
+    "letter",
+    "sum total",
+    "text length",
+];
 const FUNCS: &[&str] = &["twice", "gcd", "spin", "greet"];
 const NUMBER_WORDS: &[&str] = &["one", "two", "three", "ten", "twenty-one", "zero"];
 const STRINGS: &[&str] = &["\"hi\"", "\"and then\"", "\"a, b\"", "\"is not\"", "\"x\""];
@@ -88,6 +109,23 @@ fn tx(text: impl Into<String>, open: bool) -> Tx {
         text: text.into(),
         open,
     }
+}
+
+/// Whether `text` ends in `the <word>` for a word that starts a prefix form (`the sum of …`).
+fn ends_like_prefix_form(text: &str) -> bool {
+    const LEADS: &[&str] = &[
+        "sum",
+        "difference",
+        "product",
+        "quotient",
+        "remainder",
+        "text",
+        "fraction",
+        "length",
+        "negation",
+    ];
+    let words: Vec<&str> = text.split(' ').collect();
+    words.len() >= 2 && words[words.len() - 2] == "the" && LEADS.contains(&words[words.len() - 1])
 }
 
 impl Gen {
@@ -118,10 +156,18 @@ impl Gen {
             2 => tx(self.rng.pick(STRINGS), false),
             3 => tx(self.rng.pick(&["true", "false"]), false),
             6 => tx("the letter \"x\"", false),
+            7 if self.rng.chance(30) => tx("there is more to hear", false),
             7 => tx("what is heard", false),
             8 => self.call(d - 1),
             9 if self.f.item_of => {
                 let idx = self.operand(d - 1);
+                // `item the sum of xs` can only be read as `the sum of xs`: a variable named like
+                // the start of a prefix form cannot sit just before `of`.
+                let idx = if ends_like_prefix_form(&idx.text) {
+                    tx("ten", false)
+                } else {
+                    idx
+                };
                 let list = self.operand(d - 1);
                 tx(format!("item {} of {}", idx.text, list.text), list.open)
             }
@@ -190,12 +236,15 @@ impl Gen {
             6 => {
                 let w = self
                     .rng
-                    .pick(&["text", "whole number", "fraction", "length"]);
+                    .pick(&["text", "whole number", "fraction", "length", "code"]);
                 let a = self.operand(d - 1);
                 tx(format!("the {w} of {}", a.text), a.open)
             }
             7 => {
                 let a = self.operand(d - 1);
+                if self.rng.chance(25) {
+                    return tx(format!("the letter with code {}", a.text), a.open);
+                }
                 tx(format!("the negation of {}", a.text), a.open)
             }
             8 => {
@@ -238,6 +287,10 @@ impl Gen {
                     format!("{} {} {}", a.text, self.rng.pick(CMP), rhs.text),
                     rhs.open,
                 )
+            }
+            5 => {
+                let a = self.closed(d, Gen::operand);
+                tx(format!("{} reads as a whole number", a.text), false)
             }
             8 if self.f.logic && d > 0 => {
                 let (a, b) = (self.expr(d - 1), self.expr(d - 1));
@@ -301,6 +354,10 @@ fn features(s: &str) -> String {
         ("the length of", "conv"),
         ("the whole number of", "conv"),
         ("the fraction of", "conv"),
+        ("the code of", "conv"),
+        ("letter with code", "conv"),
+        ("more to hear", "input"),
+        ("reads as", "reads"),
         ("not", "not"),
         ("negation", "neg"),
     ] {
@@ -466,6 +523,10 @@ const SOUP: &[&str] = &[
     "negation",
     "whole number",
     "what is heard",
+    "there is more to hear",
+    "reads as a whole number",
+    "code",
+    "the letter with code",
     "heard",
     ",",
     ",",
@@ -596,4 +657,40 @@ fn block_headers_are_never_ambiguous() {
         let codes = parse_codes(&src);
         assert!(codes.is_empty(), "{header}: {codes:?}");
     }
+}
+
+/// Which ordinary English words cannot be used as a one-word name, in a declaration and in an
+/// expression? Prints the count and the words (`--ignored --nocapture`).
+#[test]
+#[ignore = "exploratory: prints the words the grammar refuses as names"]
+fn explore_names() {
+    let words: Vec<&str> = include_str!("../../syntaxeon-lexicon/lexicon/common-words.txt")
+        .lines()
+        .filter(|w| w.len() >= 2 && w.chars().all(|c| c.is_ascii_lowercase()))
+        .collect();
+    let mut refused: Vec<(&str, &str)> = Vec::new();
+    for w in &words {
+        let declare = statement_readings(&format!("Let the {w}, a whole number, become ten."));
+        let usage = statement_readings(&format!("Proclaim the text of the {w}."));
+        let assign = statement_readings(&format!("Let the {w} now be ten."));
+        let why = match (declare.len(), usage.len(), assign.len()) {
+            (1, 1, 1) => continue,
+            (0, _, _) => "declaration",
+            (_, 0, _) => "use",
+            (_, _, 0) => "assignment",
+            _ => "ambiguous",
+        };
+        refused.push((w, why));
+    }
+    // Per ten thousand, to stay in integers.
+    eprintln!(
+        "{} of {} common words are refused as names ({} per 10 000)",
+        refused.len(),
+        words.len(),
+        refused.len() * 10_000 / words.len()
+    );
+    for (w, why) in &refused {
+        eprint!("{w}({why}) ");
+    }
+    eprintln!();
 }

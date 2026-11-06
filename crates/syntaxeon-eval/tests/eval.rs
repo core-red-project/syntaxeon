@@ -2,12 +2,13 @@
 #![allow(clippy::many_single_char_names)] // short names for lexed/parsed stages in a test helper
 
 use syntaxeon_check::check;
-use syntaxeon_eval::{MAX_FRAMES, RuntimeError, run};
+use syntaxeon_eval::{MAX_FRAMES, RuntimeError, run, run_vm};
 use syntaxeon_lex::lexer::lex;
 use syntaxeon_lex::literary::stanzas;
 use syntaxeon_syntax::parse_program;
 
-/// Parses, type-checks and runs `src` on a big-stack thread; returns (result, stdout).
+/// Parses, type-checks and runs `src` on a big-stack thread with both engines, which must
+/// agree; returns the evaluator's (result, stdout).
 fn exec(src: &str, input: &str) -> (Result<(), RuntimeError>, String) {
     let (src, input) = (src.to_string(), input.to_string());
     std::thread::Builder::new()
@@ -21,6 +22,15 @@ fn exec(src: &str, input: &str) -> (Result<(), RuntimeError>, String) {
             assert_eq!(c.len(), 0, "checker: {c:?}");
             let mut out = Vec::new();
             let r = run(&p, &mut input.as_bytes(), &mut out);
+            // The VM must be indistinguishable from the tree evaluator: same output, same
+            // error with the same line and span (ADR-021).
+            let mut vm_out = Vec::new();
+            let vm = run_vm(&p, &mut input.as_bytes(), &mut vm_out);
+            assert_eq!(vm, r, "VM and evaluator disagree on the result of:\n{src}");
+            assert_eq!(
+                vm_out, out,
+                "VM and evaluator disagree on the output of:\n{src}"
+            );
             (r, String::from_utf8(out).unwrap())
         })
         .unwrap()
@@ -279,4 +289,95 @@ fn output_is_kept_when_the_program_later_fails() {
     );
     assert_eq!(out, "before\n");
     assert!(r.is_err());
+}
+
+// ---- the three primitives (ADR-018) --------------------------------------------------------
+
+#[test]
+fn a_letter_and_its_code_convert_both_ways() {
+    assert_eq!(
+        say(
+            "Proclaim the text of the code of the letter \"a\".\nProclaim the text of the code of the letter \"é\"."
+        ),
+        "97\n233\n"
+    );
+    assert_eq!(
+        say(
+            "Proclaim the text of the letter with code 98.\nProclaim the text of the letter with code 233."
+        ),
+        "b\né\n"
+    );
+    // Upper case without a table: the codes of `a` and `A` differ by 32.
+    assert_eq!(
+        say(
+            "Let the c, a letter, become the letter \"q\".\nProclaim the text of the letter with code the difference of the code of the c and 32."
+        ),
+        "Q\n"
+    );
+}
+
+#[test]
+fn a_code_that_is_no_letter_is_a_conversion_error() {
+    assert_eq!(
+        fail("Proclaim the text of the letter with code the negation of 1."),
+        "SXP-506"
+    );
+    assert_eq!(
+        fail("Proclaim the text of the letter with code 55296."),
+        "SXP-506"
+    ); // a surrogate
+    assert_eq!(
+        fail("Proclaim the text of the letter with code 1114112."),
+        "SXP-506"
+    ); // past U+10FFFF
+}
+
+#[test]
+fn more_to_hear_asks_without_consuming() {
+    let src = "Thus begins the tale:\nProclaim the text of there is more to hear.\nProclaim what is heard.\nProclaim the text of there is more to hear.\nProclaim what is heard.\nProclaim the text of there is more to hear.\n";
+    assert_eq!(
+        exec(src, "a\nb\n"),
+        (Ok(()), "true\na\ntrue\nb\nfalse\n".to_string())
+    );
+    // Nothing at all, and a last line with no terminator.
+    assert_eq!(exec(src, "").0.unwrap_err().code, "SXP-505");
+    let (r, out) = exec(
+        "Thus begins the tale:\nProclaim the text of there is more to hear.\nProclaim what is heard.\nProclaim the text of there is more to hear.\n",
+        "tail",
+    );
+    assert_eq!((r, out.as_str()), (Ok(()), "true\ntail\nfalse\n"));
+}
+
+#[test]
+fn a_filter_reads_until_the_input_ends() {
+    let src = "Thus begins the tale:\nLet the total, a whole number, become zero.\nAs long as there is more to hear, do:\nLet the line, a text, become what is heard.\nIf the line reads as a whole number, then:\nLet the total now be the sum of the total and the whole number of the line.\nSo be it.\nSo be it.\nProclaim the text of the total.\n";
+    assert_eq!(
+        exec(src, "5\nabc\n-2\n 7\n+4\n"),
+        (Ok(()), "7\n".to_string())
+    );
+}
+
+#[test]
+fn reads_as_a_whole_number_follows_the_conversion_rule() {
+    let cases = [
+        ("42", "true"),
+        ("-7", "true"),
+        ("+3", "true"),
+        ("007", "true"),
+        ("", "false"),
+        ("+", "false"),
+        ("1.5", "false"),
+        (" 5", "false"),
+        ("5 ", "false"),
+        ("9223372036854775807", "true"),
+        ("9223372036854775808", "false"),
+        ("-9223372036854775808", "true"),
+        ("abc", "false"),
+    ];
+    for (text, want) in cases {
+        let src = format!(
+            "Let the t, a text, become \"{text}\".\nLet the b, a truth, become the t reads as a whole number.\nProclaim the text of the b."
+        );
+        assert_eq!(say(&src), format!("{want}\n"), "{text:?}");
+    }
 }

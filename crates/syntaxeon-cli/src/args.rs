@@ -11,6 +11,8 @@ pub struct Opts {
     pub all: bool,
     /// `rhymes`: how many words to show; `0` means no limit.
     pub limit: Option<usize>,
+    /// `rhymes`: also list words that rhyme only by assonance.
+    pub near: bool,
     /// `fmt`: rewrite the file in place.
     pub write: bool,
     /// `fmt`: change nothing, exit 1 if the file is not formatted.
@@ -24,6 +26,7 @@ pub enum Cmd {
     Check(String),
     Explain(String),
     Ast(String),
+    Ir(String),
     Run(String),
     Rhymes(String),
     Fmt(String),
@@ -31,11 +34,12 @@ pub enum Cmd {
     Man,
 }
 
-pub const COMMANDS: [&str; 10] = [
+pub const COMMANDS: [&str; 11] = [
     "check",
     "fmt",
     "explain",
     "ast",
+    "ir",
     "run",
     "rhymes",
     "completions",
@@ -91,6 +95,7 @@ pub fn parse(args: &[String]) -> Result<(Opts, Cmd), Usage> {
             "--json" => opts.json = true,
             "--no-color" => opts.no_color = true,
             "--all" => opts.all = true,
+            "--near" => opts.near = true,
             "--write" => opts.write = true,
             "--check" => opts.check = true,
             "--limit" => {
@@ -130,6 +135,7 @@ pub fn parse(args: &[String]) -> Result<(Opts, Cmd), Usage> {
         "run" => Cmd::Run(one(rest, "a file")?),
         "rhymes" => Cmd::Rhymes(one(rest, "a word")?),
         "ast" => Cmd::Ast(one(rest, "a file (or '-' for stdin)")?),
+        "ir" => Cmd::Ir(one(rest, "a file (or '-' for stdin)")?),
         "completions" => Cmd::Completions(one(rest, "a shell")?),
         other => {
             return Err(Usage(match suggest(other) {

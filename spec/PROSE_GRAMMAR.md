@@ -65,7 +65,7 @@ The literary layer produces the **stanza table** (`SEMANTIC_CORE.md` §1):
 `StanzaId → { verses: [Verse{end_word, span, structural: bool}], … }`.
 A verse is `structural` iff it is exactly `Otherwise:` or the closer
 `So be it.` (§8). Headers are **not** structural: they carry content and
-count for rhyme (`PROSODY.md` §6).
+count for rhyme, on the words before their closer (`PROSODY.md` §6).
 
 ## 4. Stanza headers
 
@@ -200,6 +200,7 @@ P1   "Do this" E "times" ":"   Stmt*  "So be it."
 | `item E of E` | `Index` |
 | `a list of E { "," E } [ "," "and" E ]` | `ListLit` |
 | `what is heard` | `Call(hear, [])` |
+| `there is more to hear` | `Call(has_input, [])` |
 | `calling N [ "with" Args ]` | `Call(N, args)` |
 
 A single-element list is `a list of E`; a zero-element list is §6.1's
@@ -212,6 +213,9 @@ A single-element list is `a list of E`; a zero-element list is §6.1's
 | `the text of E` | `Call(to_string, [E])` |
 | `the whole number of E` | `Call(to_integer, [E])` |
 | `the fraction of E` | `Call(to_float, [E])` |
+| `the code of E` | `Call(to_code, [E])` |
+| `the letter with code E` | `Call(to_letter, [E])` |
+| `E reads as a whole number` | `Call(reads_as_integer, [E])` (expression level, like a comparison: `E` is an operand, and the result is not an operand) |
 | `the length of E` | `Call(length, [E])` |
 | `E with E appended` | `Call(append, [E, E])` |
 
@@ -298,6 +302,16 @@ current rule expects. A name that is *declared or used* (declarations, parameter
 spaces collapsed) is defined in `SEMANTIC_CORE.md` §2. Because role words
 are reserved, `Let the counter be one.` is unambiguous: `the counter` is the
 maximal word run before `be`.
+
+The words that start a prefix form (`sum`, `difference`, `product`, `quotient`,
+`remainder`, `text`, `fraction`, `length`, `negation`, `whole`, `letter`, `code`)
+are **not** reserved. After `the`, a name may not begin with the *whole lead* of
+a prefix form (`the sum of`, `the whole number of`, `the letter with code`) or
+with `letter` followed by a quoted string, since those are the forms; any other
+name is free: `the sum`, `the text`, `the length`, `the sum total` are variables,
+and `the sum of one and two` is the prefix form. The one place this bites is a
+variable named like a prefix form right before `of`: `item the sum of xs` can
+only be read as `the sum of xs`, so write `item sum of xs` (no article) or rename.
 
 ## 10. Diagnostic codes (`SXP-1xx`)
 

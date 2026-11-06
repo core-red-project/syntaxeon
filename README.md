@@ -92,10 +92,13 @@ The four end words (`men`, `again`, `ten`, `amen`) form the stanza's `AABB` sche
 | `fmt <file>` | Print the program in canonical form, keeping its meaning and its rhymes (`--write` rewrites the file, `--check` exits 1 if it would change) |
 | `explain <file>` | Show how each stanza reads and rhymes |
 | `ast <file>` | Dump the canonical AST |
+| `ir <file>` | Dump the intermediate representation the VM runs |
 | `run <file>` | Check, then run the program (`hear` reads standard input) |
-| `rhymes <word>` | List common words that rhyme with a word, one per line (`--limit <n>`, `--all` for every lexicon word, `--json`) |
+| `rhymes <word>` | List common words that rhyme with a word, most common first, one per line (`--limit <n>`, `--all` for every lexicon word, `--near` to add assonant partners, `--json`) |
 | `completions <shell>` | Print a completion script: bash, zsh, fish, powershell |
 | `help`, `version` | Usage and version |
+
+`rhymes --near` also lists words that rhyme only by assonance.
 
 Global options: `-q`/`--quiet`, `-v`/`--verbose`, `--json` (`check` and `rhymes`), `--no-color`, `-h`/`--help`, `-V`/`--version`. Use `-` as the file to read standard input (except for `run`).
 
@@ -113,7 +116,14 @@ Data goes to stdout; diagnostics, notes and errors go to stderr. Color is off wh
 
 ### Configuration
 
-Syntaxeon reads no configuration files and no environment variables except `NO_COLOR`. The pronunciation lexicon is embedded in the binary.
+Syntaxeon reads no environment variables except `NO_COLOR`, and the pronunciation lexicon is embedded in the binary. The one configuration file is `rhythm.toml`, found like `rustfmt.toml` (the source file's directory, then its parents), which sets how strict rhyme is:
+
+```toml
+[rhyme]
+assonance = false   # default true; false makes only perfect rhyme valid
+```
+
+By default a near-rhyme such as `men` / `bed` (same vowels, different consonants) is valid; with `assonance = false` only perfect rhyme is. A malformed file is `SXP-305`, never ignored. See [ADR-015](spec/adr/ADR-015-assonance-and-rhythm-toml.md).
 
 ### Benchmarks
 
@@ -141,7 +151,9 @@ syntaxeon/
 | `syntaxeon-lex` | Lexer, verses and stanzas, prosody driver |
 | `syntaxeon-syntax` | Prose parser (all readings) lowering to the AST |
 | `syntaxeon-check` | Name resolution and type checking |
-| `syntaxeon-eval` | Tree-walking evaluator |
+| `syntaxeon-eval` | IR, VM and the reference tree evaluator |
+| `syntaxeon-analysis` | The phases in order, formatting, `rhythm.toml`, headlines, the phonetic verse report |
+| `syntaxeon-lsp` | The `syntaxeon-lsp` language server (for editors; plays no sound) |
 | `syntaxeon-cli` | The `syntaxeon` command |
 
 The language is defined in [spec/](spec/); start with [the charter](spec/LANGUAGE_DESIGN_CHARTER.md).

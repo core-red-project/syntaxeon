@@ -164,3 +164,29 @@ fn pragma_errors() {
     // An ordinary aside is a comment, not a pragma.
     assert_eq!(codes("(a comment)\nmen.\nten.\n").len(), 0);
 }
+
+#[test]
+fn headers_rhyme_before_their_closer() {
+    // (header, end word): a block header rhymes on its condition or count, a function header on
+    // its title, a stanza header on its title; anything else on its last word.
+    let cases = [
+        ("If the pile is ten, then:", "ten"),
+        ("As long as the pile is less than the hen, do:", "hen"),
+        ("Do this three times:", "three"),
+        ("Do this the sum of 99999 and 1 times:", "one"),
+        (
+            "To double, taking n as whole number, giving whole number:",
+            "double",
+        ),
+        ("To the tale of two, taking n as whole number:", "two"),
+        ("To \"big sum\", taking n as whole number:", "sum"),
+        ("Thus begins the tale of men:", "men"),
+        ("Speak \"then, and do\".", "do"),
+        ("Give back the men.", "men"),
+    ];
+    for (src, want) in cases {
+        let l = lex(&format!("{src}\n"));
+        let verses = stanzas(&l);
+        assert_eq!(verses[0].verses[0].end_word.as_deref(), Ok(want), "{src}");
+    }
+}

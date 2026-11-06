@@ -25,12 +25,15 @@ pub fn check(lexed: &Lexed, stanzas: &[Stanza], lex: &mut Lexicon) -> Vec<Diagno
         }
     }
     for stanza in stanzas {
-        let Some(first) = stanza.verses.first() else {
+        if stanza.verses.is_empty() {
             continue;
-        };
+        }
+        // The counting verses with their end words, so an error can point at the right one.
+        let counting: Vec<&crate::literary::Verse> =
+            stanza.verses.iter().filter(|v| !v.structural).collect();
         let mut words: Vec<&str> = Vec::new();
         let mut broken = false;
-        for v in stanza.verses.iter().filter(|v| !v.structural) {
+        for v in &counting {
             if let Ok(w) = &v.end_word {
                 words.push(w);
             } else {
@@ -39,7 +42,7 @@ pub fn check(lexed: &Lexed, stanzas: &[Stanza], lex: &mut Lexicon) -> Vec<Diagno
                     code: "SXP-203",
                     message: "verse has no extractable end word".to_string(),
                     line: v.line,
-                    span: None,
+                    span: Some(v.span),
                 });
             }
         }
@@ -47,6 +50,12 @@ pub fn check(lexed: &Lexed, stanzas: &[Stanza], lex: &mut Lexicon) -> Vec<Diagno
             continue;
         }
         if let Err(e) = check_stanza(lex, &words) {
+            // The verse the error is about: the first that fails, the unknown one, or the lone one.
+            let at = match &e {
+                StanzaError::TooShort { .. } => 0,
+                StanzaError::Unpronounceable(w) => words.iter().position(|x| x == w).unwrap_or(0),
+                StanzaError::NoScheme { failing, .. } => failing.first().copied().unwrap_or(0),
+            };
             let message = match &e {
                 StanzaError::TooShort { count } => {
                     format!("stanza has {count} counting verse(s); at least 2 required")
@@ -57,11 +66,12 @@ pub fn check(lexed: &Lexed, stanzas: &[Stanza], lex: &mut Lexicon) -> Vec<Diagno
                     format!("verses ending in {bad:?} fail to rhyme")
                 }
             };
+            let verse = counting.get(at).copied().or(stanza.verses.first());
             out.push(Diagnostic {
                 code: e.code(),
                 message,
-                line: first.line,
-                span: None,
+                line: verse.map_or(0, |v| v.line),
+                span: verse.and_then(|v| v.end_span.or(Some(v.span))),
             });
         }
     }

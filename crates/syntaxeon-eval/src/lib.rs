@@ -8,25 +8,21 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::ops::{Deref, DerefMut};
 
-use syntaxeon_core::{BinOp, Expr, ExprKind, Program, Span, Stanza, Stmt, StmtKind, Target, UnOp};
+use syntaxeon_core::{BinOp, Expr, ExprKind, Program, Span, Stanza, Stmt, StmtKind, Target};
 
-/// 2^63 as a float: the exclusive upper bound of `Integer`.
-const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
+mod ir;
+mod rt;
+mod vm;
+
+pub use ir::{Ir, lower};
+pub use vm::run as run_vm;
+
+use rt::{Rt, Value, truthy};
 
 /// Deterministic call-depth limit (`SXP-504`).
 pub const MAX_FRAMES: usize = 10_000;
-
-#[derive(Clone, Debug, PartialEq)]
-enum Value {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Str(String),
-    Char(char),
-    List(Vec<Value>),
-    Unit,
-}
 
 /// A runtime failure; the program aborts with it (`spec/SEMANTIC_CORE.md` §6).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,11 +44,21 @@ enum Flow {
 
 struct Interp<'a> {
     fns: HashMap<&'a str, &'a Stanza>,
-    stdin: &'a mut dyn BufRead,
-    out: &'a mut dyn Write,
+    rt: Rt<'a>,
     depth: usize,
-    line: usize,
-    span: Option<Span>,
+}
+
+impl<'a> Deref for Interp<'a> {
+    type Target = Rt<'a>;
+    fn deref(&self) -> &Rt<'a> {
+        &self.rt
+    }
+}
+
+impl DerefMut for Interp<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rt
+    }
 }
 
 /// Runs the entry stanza (the first one). Program output goes to `out`.
@@ -75,50 +81,22 @@ pub fn run(
             .iter()
             .map(|s| (s.title.as_str(), s))
             .collect(),
-        stdin,
-        out,
+        rt: Rt {
+            stdin,
+            out,
+            line: entry.line,
+            span: None,
+        },
         depth: 0,
-        line: entry.line,
-        span: None,
     };
     it.call(entry, Vec::new())?;
-    it.out
+    it.rt
+        .out
         .flush()
         .map_err(|e| it.err("SXP-507", format!("cannot write output: {e}")))
 }
 
-fn truthy(v: &Value) -> bool {
-    matches!(v, Value::Bool(true))
-}
-
-fn to_text(v: &Value) -> Option<String> {
-    Some(match v {
-        Value::Int(n) => n.to_string(),
-        // Shortest round-trip form, always showing the fraction: 1.0, 0.1, 1e21, NaN, inf.
-        Value::Float(f) => format!("{f:?}"),
-        Value::Bool(b) => b.to_string(),
-        Value::Char(c) => c.to_string(),
-        _ => return None,
-    })
-}
-
 impl Interp<'_> {
-    fn err(&self, code: &'static str, message: impl Into<String>) -> RuntimeError {
-        RuntimeError {
-            code,
-            message: message.into(),
-            line: self.line,
-            span: self.span,
-        }
-    }
-
-    fn internal(&self, what: &str) -> RuntimeError {
-        self.err(
-            "SXP-599",
-            format!("internal error: {what} (the program was not type-checked)"),
-        )
-    }
-
     fn call(&mut self, st: &Stanza, args: Vec<Value>) -> Res<Value> {
         self.depth += 1;
         if self.depth > MAX_FRAMES {
@@ -152,7 +130,7 @@ impl Interp<'_> {
 
     fn stmt(&mut self, env: &mut Scopes, s: &Stmt) -> Res<Flow> {
         self.line = s.line;
-        self.span = None;
+        self.span = (!s.span.is_empty()).then_some(s.span);
         match &s.kind {
             StmtKind::Decl { name, init, .. } => {
                 let v = self.eval(env, init)?;
@@ -173,15 +151,16 @@ impl Interp<'_> {
                     return self.block(env, o);
                 }
             }
-            StmtKind::While { cond, body } => {
-                while truthy(&self.eval(env, cond)?) {
-                    self.line = s.line;
-                    self.span = None;
-                    if let Flow::Return(v) = self.block(env, body)? {
-                        return Ok(Flow::Return(v));
-                    }
+            StmtKind::While { cond, body } => loop {
+                self.line = s.line;
+                self.span = (!s.span.is_empty()).then_some(s.span);
+                if !truthy(&self.eval(env, cond)?) {
+                    break;
                 }
-            }
+                if let Flow::Return(v) = self.block(env, body)? {
+                    return Ok(Flow::Return(v));
+                }
+            },
             StmtKind::Repeat { count, body } => {
                 let Value::Int(n) = self.eval(env, count)? else {
                     return Err(self.internal("repeat count"));
@@ -310,138 +289,5 @@ impl Interp<'_> {
                 }
             }
         })
-    }
-
-    fn unary(&self, op: UnOp, v: Value) -> Res<Value> {
-        match (op, v) {
-            (UnOp::Neg, Value::Int(n)) => n
-                .checked_neg()
-                .map(Value::Int)
-                .ok_or_else(|| self.err("SXP-501", "integer overflow in negation")),
-            (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
-            (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-            _ => Err(self.internal("unary operand")),
-        }
-    }
-
-    fn index(&self, l: Value, i: i64) -> Res<Value> {
-        let oob = |len: usize| {
-            self.err(
-                "SXP-503",
-                format!("index {i} is outside a sequence of {len}"),
-            )
-        };
-        match l {
-            Value::List(items) => usize::try_from(i)
-                .ok()
-                .and_then(|i| items.get(i).cloned())
-                .ok_or_else(|| oob(items.len())),
-            Value::Str(s) => usize::try_from(i)
-                .ok()
-                .and_then(|i| s.chars().nth(i))
-                .map(Value::Char)
-                .ok_or_else(|| oob(s.chars().count())),
-            _ => Err(self.internal("indexed value")),
-        }
-    }
-
-    fn binary(&self, op: BinOp, x: &Value, y: &Value) -> Res<Value> {
-        use Value::{Bool, Char, Float, Int, Str};
-        let overflow = || self.err("SXP-501", format!("integer overflow in {op:?}"));
-        let zero = || self.err("SXP-502", "division by zero");
-        Ok(match (op, x, y) {
-            (BinOp::Eq, ..) => Bool(x == y),
-            (BinOp::Ne, ..) => Bool(x != y),
-            (BinOp::Add, Int(a), Int(b)) => Int(a.checked_add(*b).ok_or_else(overflow)?),
-            (BinOp::Sub, Int(a), Int(b)) => Int(a.checked_sub(*b).ok_or_else(overflow)?),
-            (BinOp::Mul, Int(a), Int(b)) => Int(a.checked_mul(*b).ok_or_else(overflow)?),
-            (BinOp::Div | BinOp::Mod, Int(_), Int(0)) => return Err(zero()),
-            (BinOp::Div, Int(a), Int(b)) => Int(a.checked_div(*b).ok_or_else(overflow)?),
-            (BinOp::Mod, Int(a), Int(b)) => Int(a.wrapping_rem(*b)),
-            (BinOp::Add, Float(a), Float(b)) => Float(a + b),
-            (BinOp::Sub, Float(a), Float(b)) => Float(a - b),
-            (BinOp::Mul, Float(a), Float(b)) => Float(a * b),
-            (BinOp::Div, Float(a), Float(b)) => Float(a / b),
-            (BinOp::Add, Str(a), Str(b)) => Str(format!("{a}{b}")),
-            (BinOp::Lt, Int(a), Int(b)) => Bool(a < b),
-            (BinOp::Le, Int(a), Int(b)) => Bool(a <= b),
-            (BinOp::Gt, Int(a), Int(b)) => Bool(a > b),
-            (BinOp::Ge, Int(a), Int(b)) => Bool(a >= b),
-            (BinOp::Lt, Float(a), Float(b)) => Bool(a < b),
-            (BinOp::Le, Float(a), Float(b)) => Bool(a <= b),
-            (BinOp::Gt, Float(a), Float(b)) => Bool(a > b),
-            (BinOp::Ge, Float(a), Float(b)) => Bool(a >= b),
-            (BinOp::Lt, Char(a), Char(b)) => Bool(a < b),
-            (BinOp::Le, Char(a), Char(b)) => Bool(a <= b),
-            (BinOp::Gt, Char(a), Char(b)) => Bool(a > b),
-            (BinOp::Ge, Char(a), Char(b)) => Bool(a >= b),
-            (BinOp::Lt, Str(a), Str(b)) => Bool(a < b),
-            (BinOp::Le, Str(a), Str(b)) => Bool(a <= b),
-            (BinOp::Gt, Str(a), Str(b)) => Bool(a > b),
-            (BinOp::Ge, Str(a), Str(b)) => Bool(a >= b),
-            _ => return Err(self.internal("binary operands")),
-        })
-    }
-
-    fn write(&mut self, s: &str) -> Res<()> {
-        self.out
-            .write_all(s.as_bytes())
-            .map_err(|e| self.err("SXP-507", format!("cannot write output: {e}")))
-    }
-
-    fn builtin(&mut self, name: &str, args: &[Value]) -> Res<Value> {
-        match (name, args) {
-            ("speak", [Value::Str(s)]) => self.write(s).map(|()| Value::Unit),
-            ("speakln", [Value::Str(s)]) => {
-                self.write(s)?;
-                self.write("\n").map(|()| Value::Unit)
-            }
-            ("hear", []) => {
-                let mut line = String::new();
-                match self.stdin.read_line(&mut line) {
-                    Ok(0) => Err(self.err("SXP-505", "no more input to hear")),
-                    Ok(_) => {
-                        let trimmed = line.strip_suffix('\n').unwrap_or(&line);
-                        Ok(Value::Str(
-                            trimmed.strip_suffix('\r').unwrap_or(trimmed).to_string(),
-                        ))
-                    }
-                    Err(e) => Err(self.err("SXP-505", format!("cannot read input: {e}"))),
-                }
-            }
-            ("length", [Value::List(v)]) => {
-                Ok(Value::Int(i64::try_from(v.len()).unwrap_or(i64::MAX)))
-            }
-            ("length", [Value::Str(s)]) => Ok(Value::Int(
-                i64::try_from(s.chars().count()).unwrap_or(i64::MAX),
-            )),
-            ("append", [Value::List(v), x]) => {
-                let mut v = v.clone();
-                v.push(x.clone());
-                Ok(Value::List(v))
-            }
-            ("to_string", [v]) => to_text(v)
-                .map(Value::Str)
-                .ok_or_else(|| self.internal("to_string")),
-            ("to_integer", [Value::Float(f)]) => {
-                let t = f.trunc();
-                if t.is_finite() && (-I64_BOUND..I64_BOUND).contains(&t) {
-                    #[allow(clippy::cast_possible_truncation)] // range checked above
-                    Ok(Value::Int(t as i64))
-                } else {
-                    Err(self.err(
-                        "SXP-506",
-                        format!("{f:?} cannot be converted to a whole number"),
-                    ))
-                }
-            }
-            ("to_integer", [Value::Str(s)]) => s
-                .parse::<i64>()
-                .map(Value::Int)
-                .map_err(|_| self.err("SXP-506", format!("{s:?} is not a whole number"))),
-            #[allow(clippy::cast_precision_loss)] // the language's Integer->Float conversion
-            ("to_float", [Value::Int(n)]) => Ok(Value::Float(*n as f64)),
-            _ => Err(self.internal(&format!("builtin {name}"))),
-        }
     }
 }

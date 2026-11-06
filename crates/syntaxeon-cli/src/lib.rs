@@ -8,9 +8,7 @@
 //! analysis); `--json` is only supported by `check`.
 
 mod args;
-mod fmt;
 mod help;
-mod pipeline;
 mod render;
 mod rhymes;
 mod style;
@@ -20,8 +18,8 @@ use std::io::{Read, Write};
 use syntaxeon_lex::Diagnostic;
 
 use args::{Cmd, Opts, parse};
-use pipeline::analyze;
 use style::Style;
+use syntaxeon_analysis::analyze;
 
 /// Terminal facts the caller supplies.
 pub struct Env {
@@ -87,7 +85,11 @@ pub fn run(
                 2
             }
         }
-        Cmd::Check(ref f) | Cmd::Explain(ref f) | Cmd::Ast(ref f) | Cmd::Run(ref f) => {
+        Cmd::Check(ref f)
+        | Cmd::Explain(ref f)
+        | Cmd::Ast(ref f)
+        | Cmd::Ir(ref f)
+        | Cmd::Run(ref f) => {
             if opts.json && !matches!(cmd, Cmd::Check(_)) {
                 let _ = writeln!(
                     err,
@@ -132,7 +134,14 @@ fn fmt_command(
             return 1;
         }
     };
-    let formatted = match fmt::format(&src) {
+    let rhythm = match syntaxeon_analysis::rhythm::load(file) {
+        Ok(r) => r,
+        Err(msg) => {
+            let _ = writeln!(err, "{msg}");
+            return 1;
+        }
+    };
+    let formatted = match syntaxeon_analysis::format::format(&src, rhythm.rules) {
         Ok(f) => f,
         Err(diagnostics) => {
             for d in &diagnostics {
@@ -203,7 +212,17 @@ fn file_command(
             let _ = writeln!(err, "note: {p}");
         }
     };
-    let a = analyze(&src, &mut note);
+    let rhythm = match syntaxeon_analysis::rhythm::load(file) {
+        Ok(r) => r,
+        Err(msg) => {
+            let _ = writeln!(err, "{msg}");
+            return 1;
+        }
+    };
+    if let Some(p) = &rhythm.path {
+        note(&format!("rhyme rules from {}", p.display()));
+    }
+    let a = analyze(&src, rhythm.rules, &mut note);
     if opts.json {
         let _ = write!(out, "{}", render::json(file, &src, &a));
         return i32::from(!a.diagnostics.is_empty());
@@ -228,9 +247,18 @@ fn file_command(
         Cmd::Ast(_) => {
             let _ = writeln!(out, "{:#?}", a.program);
         }
+        Cmd::Ir(_) => match syntaxeon_eval::lower(&a.program) {
+            Ok(ir) => {
+                let _ = write!(out, "{ir}");
+            }
+            Err(e) => {
+                let _ = writeln!(err, "error: {}", e.message);
+                return 1;
+            }
+        },
         Cmd::Run(_) => {
             let mut input = std::io::BufReader::new(stdin);
-            if let Err(e) = syntaxeon_eval::run(&a.program, &mut input, out) {
+            if let Err(e) = syntaxeon_eval::run_vm(&a.program, &mut input, out) {
                 let _ = write!(
                     err,
                     "{}",

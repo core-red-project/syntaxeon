@@ -16,6 +16,6 @@
 | `aarch64-apple-darwin` | `macos-15` |
 | `x86_64-pc-windows-msvc` | `windows-2025` |
 
-Each archive has a single top-level folder `syntaxeon-<version>-<target>/` holding the binary, `LICENSE`, `README.md`, `man/syntaxeon.1` and `completions/` for bash, zsh, fish and PowerShell.
+Each archive has a single top-level folder `syntaxeon-<version>-<target>/` holding the two binaries (`syntaxeon` and the language server `syntaxeon-lsp`), `LICENSE`, `README.md`, `man/syntaxeon.1` and `completions/` for bash, zsh, fish and PowerShell.
 
 Build one locally with `TARGET=aarch64-apple-darwin VERSION=0.0.1 just package` (needs `jq`).

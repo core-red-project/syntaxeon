@@ -72,17 +72,16 @@ pub fn find_scheme(lex: &Lexicon, end_words: &[&str]) -> Result<Vec<usize>, Stan
     }
     let mut best: Option<(Vec<usize>, Vec<usize>)> = None;
     for scheme in candidates {
-        let mut first: Vec<Option<usize>> = vec![None; scheme.len()];
+        // Every pair in a group must rhyme, so the verdict does not depend on which verse
+        // leads; a verse is reported when it fails against an earlier member of its group.
         let mut failing = Vec::new();
         for (i, &g) in scheme.iter().enumerate() {
-            match first[g] {
-                None => first[g] = Some(i),
-                Some(f) => {
-                    // Words were verified pronounceable above.
-                    if !words_rhyme(lex, end_words[f], end_words[i]).unwrap_or(false) {
-                        failing.push(i);
-                    }
-                }
+            // Words were verified pronounceable above.
+            let fails = (0..i)
+                .filter(|&j| scheme[j] == g)
+                .any(|j| !words_rhyme(lex, end_words[j], end_words[i]).unwrap_or(false));
+            if fails {
+                failing.push(i);
             }
         }
         if failing.is_empty() {

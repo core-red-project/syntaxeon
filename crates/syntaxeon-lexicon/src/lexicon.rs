@@ -80,6 +80,28 @@ impl PragmaError {
     }
 }
 
+/// Which rhymes are valid (`spec/PROSODY.md` §4). Perfect rhyme is always valid; a project can
+/// turn the looser kinds off in its `rhythm.toml` (ADR-015).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RhymeRules {
+    /// Assonance: the same vowels from the stressed vowel on, whatever the consonants.
+    pub assonance: bool,
+}
+
+impl Default for RhymeRules {
+    fn default() -> Self {
+        RhymeRules { assonance: true }
+    }
+}
+
+impl RhymeRules {
+    /// Only perfect rhyme.
+    #[must_use]
+    pub fn perfect() -> Self {
+        RhymeRules { assonance: false }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Lexicon {
     /// The dictionary, shared between clones (a clone per analyzed file must stay cheap).
@@ -88,6 +110,9 @@ pub struct Lexicon {
     extra: HashMap<String, Vec<Pron>>,
     /// Common English words, for `rhymes` suggestions; empty unless loaded.
     common: Arc<HashSet<String>>,
+    /// Frequency tier (10 most common, then 20) of the words that have one; see [`Lexicon::tier`].
+    tiers: Arc<HashMap<String, u8>>,
+    rules: RhymeRules,
 }
 
 impl Lexicon {
@@ -147,6 +172,39 @@ impl Lexicon {
         );
     }
 
+    /// Sets which rhymes are valid for this lexicon.
+    pub fn set_rhyme_rules(&mut self, rules: RhymeRules) {
+        self.rules = rules;
+    }
+
+    #[must_use]
+    pub fn rhyme_rules(&self) -> RhymeRules {
+        self.rules
+    }
+
+    /// Loads the frequency tiers: `word tier` per line, `#` lines ignored.
+    pub fn set_word_tiers(&mut self, text: &str) {
+        self.tiers = Arc::new(
+            text.lines()
+                .filter(|l| !l.starts_with('#'))
+                .filter_map(|l| {
+                    let (w, t) = l.split_once(' ')?;
+                    Some((w.to_string(), t.trim().parse().ok()?))
+                })
+                .collect(),
+        );
+    }
+
+    /// How common `word` is, smaller meaning more common: 10 and 20 from the tier list, 35 for
+    /// any other common word, 99 for everything else. Only used to order `rhymes` output.
+    #[must_use]
+    pub fn tier(&self, word: &str) -> u8 {
+        self.tiers
+            .get(word)
+            .copied()
+            .unwrap_or(if self.is_common(word) { 35 } else { 99 })
+    }
+
     /// Whether `word` is in the common-word list (`false` when no list is loaded).
     #[must_use]
     pub fn is_common(&self, word: &str) -> bool {
@@ -170,6 +228,7 @@ impl Lexicon {
 const PINNED_DICT: &str = include_str!("../lexicon/cmudict.dict");
 const PINNED_LOCK: &str = include_str!("../lexicon/lexicon.lock");
 const PINNED_COMMON: &str = include_str!("../lexicon/common-words.txt");
+const PINNED_TIERS: &str = include_str!("../lexicon/word-tiers.txt");
 
 /// `SXP-304`: the vendored lexicon does not match `lexicon.lock` (tooling error).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +273,11 @@ pub fn verify_common_pin(list: &str, lock: &str) -> Result<(), PinError> {
     verify_hash(list, lock, "common_words_sha256", "common-word list")
 }
 
+/// Checks the frequency-tier list against the `word_tiers_sha256 = "..."` line of `lock`.
+pub fn verify_tiers_pin(list: &str, lock: &str) -> Result<(), PinError> {
+    verify_hash(list, lock, "word_tiers_sha256", "word-tier list")
+}
+
 impl Lexicon {
     /// The vendored, hash-verified lexicon (`spec/PROSODY.md` §2). Verified and parsed once.
     pub fn pinned() -> Result<Lexicon, PinError> {
@@ -221,8 +285,10 @@ impl Lexicon {
         CELL.get_or_init(|| {
             verify_pin(PINNED_DICT, PINNED_LOCK)?;
             verify_common_pin(PINNED_COMMON, PINNED_LOCK)?;
+            verify_tiers_pin(PINNED_TIERS, PINNED_LOCK)?;
             let mut lex = Lexicon::parse(PINNED_DICT).map_err(|e| PinError(e.to_string()))?;
             lex.set_common_words(PINNED_COMMON);
+            lex.set_word_tiers(PINNED_TIERS);
             Ok(lex)
         })
         .clone()

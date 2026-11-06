@@ -168,12 +168,16 @@ prose verbs to them (verb sets are closed — ADR-005).
 |---|---|---|
 | `speak` | `Fn(String, Unit)` | writes to stdout, no newline |
 | `speakln` | `Fn(String, Unit)` | with newline |
-| `hear` | `Fn(String)` (no params) | reads one line from stdin; EOF ⇒ `SXP-505` |
+| `hear` | `Fn(String)` (no params) | reads one line from stdin without its terminator (`\n` or `\r\n`; a last line with no terminator is a line, an empty rest is not); end of input or a read error ⇒ `SXP-505` |
 | `length` | `Fn(List(T)\|String, Integer)` | |
 | `append` | `Fn(List(T), T, List(T))` | returns a new list |
 | `to_string` | `Fn(T, String)` | `T ∈ {Integer, Float, Boolean, Character}`; Float uses the shortest round-trip form that always shows a fraction or exponent (`1.0`, `0.1`, `1e21`, `NaN`, `inf`) |
-| `to_integer` | `Fn(Float\|String, Integer)` | truncates toward zero; bad string, NaN, infinity or out-of-range float ⇒ `SXP-506` |
+| `to_integer` | `Fn(Float\|String, Integer)` | truncates toward zero; a String is an optional `+` or `-` then ASCII digits and nothing else (no spaces, no separators); a bad or out-of-range String, NaN, infinity or out-of-range float ⇒ `SXP-506` |
 | `to_float` | `Fn(Integer, Float)` | |
+| `to_code` | `Fn(Character, Integer)` | the Unicode scalar value of the letter |
+| `to_letter` | `Fn(Integer, Character)` | the letter with that Unicode scalar value; a negative number, a surrogate (`U+D800`–`U+DFFF`) or a value above `U+10FFFF` ⇒ `SXP-506` |
+| `has_input` | `Fn(Boolean)` (no params) | whether `hear` would find a line: true iff any input remains. Reads nothing; a read error counts as no input |
+| `reads_as_integer` | `Fn(String, Boolean)` | true iff `to_integer` of the same text would succeed (the rule in the `to_integer` row) |
 
 Builtins may be called but not redefined (`SXP-407`).
 
@@ -218,7 +222,7 @@ Runtime codes in use (`syntaxeon-eval`):
 | 503 | list or string index out of range (negative included) |
 | 504 | more than 10 000 call frames (the entry stanza is frame 1) |
 | 505 | `hear` at end of input, or an input error |
-| 506 | failed conversion (`to_integer`) |
+| 506 | failed conversion (`to_integer`, `to_letter`) |
 | 507 | cannot write output |
 | 599 | internal: an unchecked program reached the evaluator |
 

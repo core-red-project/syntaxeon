@@ -6,7 +6,7 @@ use syntaxeon_lex::lexer::{Lexed, Tok, lex};
 use syntaxeon_lex::literary::Stanza as Verses;
 
 use crate::grammar::{Open, P};
-use crate::rules::{FORMS, Step};
+use crate::rules::{DETS, FORMS, RESERVED, Step};
 
 struct Sentence {
     toks: Vec<Tok>,
@@ -15,13 +15,42 @@ struct Sentence {
     line: usize,
 }
 
-fn diag(code: &'static str, message: &str, line: usize) -> Diagnostic {
+impl Sentence {
+    /// The words of the sentence, without its terminator.
+    fn span(&self) -> Span {
+        match (self.spans.first(), self.spans.last()) {
+            (Some(a), Some(b)) => Span {
+                start: a.start,
+                end: b.end,
+            },
+            _ => Span::default(),
+        }
+    }
+}
+
+/// An error about a whole sentence.
+fn diag(code: &'static str, message: &str, at: &Sentence) -> Diagnostic {
+    diag_span(code, message, at.line, at.span())
+}
+
+fn diag_span(code: &'static str, message: &str, line: usize, span: Span) -> Diagnostic {
     Diagnostic {
         code,
         message: message.to_string(),
         line,
-        span: None,
+        span: (!span.is_empty()).then_some(span),
     }
+}
+
+/// Readings with the same meaning are one, whatever words each focuses on.
+fn dedup_readings(v: Vec<(StmtKind, Span)>) -> Vec<(StmtKind, Span)> {
+    let mut out: Vec<(StmtKind, Span)> = Vec::new();
+    for x in v {
+        if !out.iter().any(|(k, _)| *k == x.0) {
+            out.push(x);
+        }
+    }
+    out
 }
 
 fn dedup<T: PartialEq>(v: Vec<T>) -> Vec<T> {
@@ -62,7 +91,19 @@ fn split_sentences(lexed: &Lexed, st: &Verses, diags: &mut Vec<Diagnostic>) -> V
         }
     }
     if !cur.is_empty() {
-        diags.push(diag("SXP-103", "sentence is not terminated", line));
+        let span = match (cur_spans.first(), cur_spans.last()) {
+            (Some(a), Some(b)) => Span {
+                start: a.start,
+                end: b.end,
+            },
+            _ => Span::default(),
+        };
+        diags.push(diag_span(
+            "SXP-103",
+            "sentence is not terminated",
+            line,
+            span,
+        ));
     }
     out
 }
@@ -87,7 +128,7 @@ fn parse_stanza(idx: usize, sentences: &[Sentence], diags: &mut Vec<Diagnostic>)
         diags.push(diag(
             "SXP-109",
             "a stanza must begin with a header ending in ':'",
-            first.line,
+            first,
         ));
         return None;
     }
@@ -98,14 +139,14 @@ fn parse_stanza(idx: usize, sentences: &[Sentence], diags: &mut Vec<Diagnostic>)
         (0, 1, _) => (entry[0].clone(), vec![], Type::Unit),
         (_, 0, 1) if idx > 0 => funcs[0].clone(),
         (_, e, f) if e + f > 1 => {
-            diags.push(diag("SXP-104", "ambiguous stanza header", first.line));
+            diags.push(diag("SXP-104", "ambiguous stanza header", first));
             return None;
         }
         (0, 0, _) => {
             diags.push(diag(
                 "SXP-109",
                 "the first stanza must begin 'Thus begins …:'",
-                first.line,
+                first,
             ));
             return None;
         }
@@ -115,11 +156,11 @@ fn parse_stanza(idx: usize, sentences: &[Sentence], diags: &mut Vec<Diagnostic>)
             } else {
                 "'Thus begins' is only legal on the first stanza"
             };
-            diags.push(diag("SXP-109", msg, first.line));
+            diags.push(diag("SXP-109", msg, first));
             return None;
         }
         _ => {
-            diags.push(diag("SXP-109", "malformed stanza header", first.line));
+            diags.push(diag("SXP-109", "malformed stanza header", first));
             return None;
         }
     };
@@ -131,12 +172,14 @@ fn parse_stanza(idx: usize, sentences: &[Sentence], diags: &mut Vec<Diagnostic>)
         ret,
         body,
         line: first.line,
+        span: first.span(),
     })
 }
 
 struct Frame {
     open: Open,
     line: usize,
+    span: Span,
     then: Vec<Stmt>,
     otherwise: Option<Vec<Stmt>>,
 }
@@ -161,7 +204,12 @@ fn close(f: Frame) -> Stmt {
             body: f.then,
         },
     };
-    Stmt { kind, line: f.line }
+    Stmt {
+        kind,
+        line: f.line,
+        span: f.span,
+        focus: f.span,
+    }
 }
 
 fn parse_body(sentences: &[Sentence], diags: &mut Vec<Diagnostic>) -> Vec<Stmt> {
@@ -178,7 +226,7 @@ fn parse_body(sentences: &[Sentence], diags: &mut Vec<Diagnostic>) -> Vec<Stmt> 
         if s.term == '.' && is(&["so", "be", "it"]) {
             match frames.pop() {
                 Some(f) => current(&mut frames, &mut root).push(close(f)),
-                None => diags.push(diag("SXP-107", "'So be it.' closes no open block", s.line)),
+                None => diags.push(diag("SXP-107", "'So be it.' closes no open block", s)),
             }
         } else if s.term == ':' && is(&["otherwise"]) {
             match frames.last_mut() {
@@ -188,7 +236,7 @@ fn parse_body(sentences: &[Sentence], diags: &mut Vec<Diagnostic>) -> Vec<Stmt> 
                 _ => diags.push(diag(
                     "SXP-107",
                     "'Otherwise:' outside an open If, or repeated",
-                    s.line,
+                    s,
                 )),
             }
         } else if s.term == ':' {
@@ -198,7 +246,7 @@ fn parse_body(sentences: &[Sentence], diags: &mut Vec<Diagnostic>) -> Vec<Stmt> 
                 0 => diags.push(diag(
                     "SXP-103",
                     "no grammar rule matches this block header",
-                    s.line,
+                    s,
                 )),
                 1 => {
                     let open = opens.remove(0);
@@ -206,12 +254,13 @@ fn parse_body(sentences: &[Sentence], diags: &mut Vec<Diagnostic>) -> Vec<Stmt> 
                         diags.push(diag(
                             "SXP-108",
                             "'an empty list of …' needs an annotated declaration",
-                            s.line,
+                            s,
                         ));
                     }
                     frames.push(Frame {
                         open,
                         line: s.line,
+                        span: s.span(),
                         then: vec![],
                         otherwise: None,
                     });
@@ -219,18 +268,26 @@ fn parse_body(sentences: &[Sentence], diags: &mut Vec<Diagnostic>) -> Vec<Stmt> 
                 n => diags.push(diag(
                     "SXP-104",
                     &format!("ambiguous block header: {n} readings"),
-                    s.line,
+                    s,
                 )),
             }
-        } else if let Some(kind) = simple_statement(s, diags) {
-            current(&mut frames, &mut root).push(Stmt { kind, line: s.line });
+        } else if let Some((kind, focus)) = simple_statement(s, diags) {
+            let span = s.span();
+            let focus = if focus.is_empty() { span } else { focus };
+            current(&mut frames, &mut root).push(Stmt {
+                kind,
+                line: s.line,
+                span,
+                focus,
+            });
         }
     }
     if let Some(f) = frames.last() {
-        diags.push(diag(
+        diags.push(diag_span(
             "SXP-107",
             "block is never closed with 'So be it.'",
             f.line,
+            f.span,
         ));
     }
     root
@@ -287,8 +344,47 @@ fn resolve_empty(kind: &mut StmtKind) -> bool {
     !kind_has_bad_empty(kind)
 }
 
-fn simple_statement(s: &Sentence, diags: &mut Vec<Diagnostic>) -> Option<StmtKind> {
-    let mut parses = dedup(P::new(&s.toks, &s.spans).statement());
+/// Why nothing matched, when that can be told: a word with a meaning in the grammar used
+/// inside a name (the sentence reads once that word is replaced by an ordinary one), or a
+/// digit glued to a word.
+fn no_reading_message(s: &Sentence) -> String {
+    const PLAIN: &str = "no grammar rule matches this sentence";
+    // Every meaningful word whose replacement makes the sentence read; articles and the like
+    // come last, since `the sum total` is better blamed on `sum` than on `the`.
+    let mut blamed: Vec<&str> = Vec::new();
+    for (i, t) in s.toks.iter().enumerate() {
+        let Tok::Word(w) = t else { continue };
+        if !RESERVED.contains(&w.as_str()) {
+            continue;
+        }
+        let mut toks = s.toks.clone();
+        toks[i] = Tok::Word("zzq".to_string());
+        if !P::new(&toks, &s.spans).statement().is_empty() {
+            blamed.push(w);
+        }
+    }
+    let pick = blamed
+        .iter()
+        .find(|w| !DETS.contains(*w))
+        .or_else(|| blamed.first());
+    if let Some(w) = pick {
+        return format!(
+            "{PLAIN}; it would read if '{w}' were an ordinary word, but '{w}' has a meaning in the grammar and cannot be part of a name (use another word)"
+        );
+    }
+    let glued = s.toks.windows(2).zip(s.spans.windows(2)).any(|(t, sp)| {
+        matches!((&t[0], &t[1]), (Tok::Word(_), Tok::Int(_))) && sp[0].end == sp[1].start
+    });
+    if glued {
+        return format!(
+            "{PLAIN}; names are made of letters only, so a digit cannot be part of one"
+        );
+    }
+    PLAIN.to_string()
+}
+
+fn simple_statement(s: &Sentence, diags: &mut Vec<Diagnostic>) -> Option<(StmtKind, Span)> {
+    let mut parses = dedup_readings(P::new(&s.toks, &s.spans).statement());
     match parses.len() {
         0 => {
             let words: Vec<&str> = s
@@ -312,29 +408,25 @@ fn simple_statement(s: &Sentence, diags: &mut Vec<Diagnostic>) -> Option<StmtKin
                 diags.push(diag(
                     "SXP-106",
                     "an infix word is where the grammar does not allow one: infix words take two plain operands, never chain, and never appear inside 'the sum of … and …'; nest with a prefix form",
-                    s.line,
-                ));
+                    s));
             } else {
-                diags.push(diag(
-                    "SXP-103",
-                    "no grammar rule matches this sentence",
-                    s.line,
-                ));
+                diags.push(diag("SXP-103", &no_reading_message(s), s));
             }
             None
         }
         1 => {
-            let mut kind = parses.remove(0);
+            let (mut kind, focus) = parses.remove(0);
             if resolve_empty(&mut kind) {
-                Some(kind)
+                Some((kind, focus))
             } else {
-                diags.push(diag("SXP-108", "'an empty list of …' is only legal in a declaration annotated with that list type", s.line));
+                diags.push(diag("SXP-108", "'an empty list of …' is only legal in a declaration annotated with that list type", s));
                 None
             }
         }
         n => {
-            let message = ambiguity_message(n, &parses);
-            diags.push(diag("SXP-104", &message, s.line));
+            let kinds: Vec<StmtKind> = parses.into_iter().map(|(k, _)| k).collect();
+            let message = ambiguity_message(n, &kinds);
+            diags.push(diag("SXP-104", &message, s));
             None
         }
     }
@@ -350,7 +442,10 @@ pub fn statement_readings(sentence: &str) -> Vec<StmtKind> {
     match toks.split_last() {
         Some((Tok::Punct('.' | '!' | '?'), body)) => {
             let spans: Vec<Span> = lexed.tokens.iter().map(|t| t.span).collect();
-            dedup(P::new(body, &spans).statement())
+            dedup_readings(P::new(body, &spans).statement())
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect()
         }
         _ => vec![],
     }

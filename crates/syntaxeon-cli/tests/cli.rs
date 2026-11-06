@@ -149,7 +149,7 @@ fn explain_marks_the_verse_that_breaks_the_rhyme() {
 
 #[test]
 fn structural_verses_are_exempt_in_explain() {
-    let src = "Thus begins the tale of men:\nIf true, then:\nSpeak \"ten\".\nSo be it.\n";
+    let src = "Thus begins the tale of two:\nIf true, then:\nSpeak \"you\".\nSo be it.\n";
     let o = exec(&["explain", "-"], src);
     assert_eq!(o.code, 0, "{}", o.err);
     assert!(o.out.contains("structural verse, exempt"));
@@ -329,7 +329,7 @@ fn every_shipped_program_passes_check() {
 
 #[test]
 fn shipped_programs_print_what_they_promise() {
-    let fizz = "1\n2\nFizz again\n4\nBuzz, say when\nFizz again\n7\n8\nFizz again\nBuzz, say when\n11\nFizz again\n13\n14\nFizzBuzz, amen\nSing it, in rhymes\n";
+    let fizz = "1\n2\nFizz, my hero\n4\nBuzz, my hero\nFizz, my hero\n7\n8\nFizz, my hero\nBuzz, my hero\n11\nFizz, my hero\n13\n14\nFizzBuzz, my hero\nSing it, so serene\n";
     let cases = [
         ("hello", "", "Hello again10\nAmen"),
         ("counting", "", "dingsing\ndingsing\ndingsing\n"),
@@ -338,10 +338,12 @@ fn shipped_programs_print_what_they_promise() {
         (
             "powers",
             "",
-            "4\n8\n16\n32\n64\n128\nRest a while\n100\nAmen",
+            "4\n8\n16\n32\n64\n128\nRest, and then\n100\nAmen",
         ),
         ("fizzbuzz", "", fizz),
         ("gcd", "", "6\n25\nStill alive"),
+        ("filter", "one\ntwo\n", "one\ntwo\nFarewell, my bird"),
+        ("filter", "", "Farewell, my bird"),
         (
             "greeter",
             "Ada\nLovelace\n",
@@ -450,7 +452,7 @@ fn fmt_keeps_examples_valid_equal_in_meaning_and_stable() {
         );
         seen += 1;
     }
-    assert!(seen >= 8);
+    assert!(seen >= 9);
 }
 
 #[test]
@@ -557,9 +559,15 @@ fn json_diagnostics_carry_column_and_span_or_null() {
         "{}",
         o.out
     );
-    // A statement-level error has no expression to point at.
-    let o = exec(&["--json", "check", "-"], BAD_RHYME);
+    // A program with no stanzas has nothing to point at; a rhyme failure points at the end word.
+    let o = exec(&["--json", "check", "-"], "");
     assert!(o.out.contains("\"column\":null,\"span\":null"), "{}", o.out);
+    let o = exec(&["--json", "check", "-"], BAD_RHYME);
+    assert!(
+        o.out.contains("\"line\":2,\"column\":7,\"span\":{"),
+        "{}",
+        o.out
+    );
 }
 
 #[test]
@@ -585,4 +593,244 @@ fn runtime_errors_underline_the_failing_expression() {
         o.err
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn rhymes_puts_the_most_common_words_first() {
+    // `men`, `pen`, `ten` are frequency tier 10; `wren` is tier 20 and must come after them.
+    let o = exec(&["rhymes", "then", "--limit", "0"], "");
+    let words: Vec<&str> = o.out.lines().collect();
+    let at = |w: &str| words.iter().position(|x| *x == w).unwrap();
+    assert_eq!(&words[..3], ["men", "pen", "ten"]);
+    assert!(at("again") < at("wren"));
+}
+
+// ---- rhythm.toml and assonance -----------------------------------------------------------
+
+const ASSONANT: &str = "Thus begins the tale of men:\nSpeak \"Go to bed\".\n";
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("syntaxeon-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn assonance_is_valid_by_default_and_a_rhythm_file_can_turn_it_off() {
+    let dir = scratch("rhythm");
+    let sub = dir.join("deep/er");
+    std::fs::create_dir_all(&sub).unwrap();
+    let file = sub.join("tale.sxe");
+    std::fs::write(&file, ASSONANT).unwrap();
+    let path = file.to_str().unwrap();
+    // `men` and `bed` share the vowel EH only.
+    assert_eq!(exec(&["check", "-q", path], "").code, 0);
+    // The nearest rhythm.toml up the tree applies.
+    std::fs::write(dir.join("rhythm.toml"), "[rhyme]\nassonance = false\n").unwrap();
+    let strict = exec(&["check", path], "");
+    assert_eq!(strict.code, 1);
+    assert!(strict.err.contains("SXP-202"), "{}", strict.err);
+    // A closer file wins.
+    std::fs::write(sub.join("rhythm.toml"), "[rhyme]\nassonance = true\n").unwrap();
+    assert_eq!(exec(&["check", "-q", path], "").code, 0);
+    // fmt reads the same rules; under strict rules this program does not rhyme, so it only
+    // gets whitespace formatting, which it already has.
+    std::fs::write(sub.join("rhythm.toml"), "[rhyme]\nassonance = false\n").unwrap();
+    assert_eq!(exec(&["fmt", "--check", path], "").code, 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_malformed_rhythm_file_is_reported_not_ignored() {
+    let dir = scratch("badrhythm");
+    let file = dir.join("tale.sxe");
+    std::fs::write(&file, GOOD).unwrap();
+    std::fs::write(dir.join("rhythm.toml"), "[rhyme]\nassonanse = false\n").unwrap();
+    let o = exec(&["check", file.to_str().unwrap()], "");
+    assert_eq!(o.code, 1);
+    assert!(
+        o.err.contains("SXP-305") && o.err.contains("rhythm.toml:2"),
+        "{}",
+        o.err
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn rhymes_near_lists_assonant_partners_after_the_perfect_ones() {
+    let o = exec(&["rhymes", "men", "--near", "--limit", "0"], "");
+    let words: Vec<&str> = o.out.lines().collect();
+    let at = |w: &str| words.iter().position(|x| *x == w).unwrap();
+    assert!(at("ten") < at("bed"), "perfect rhymes first");
+    assert!(o.err.contains("only by assonance"), "{}", o.err);
+    let plain = exec(&["rhymes", "men", "--limit", "0"], "");
+    assert!(!plain.out.lines().any(|w| w == "bed"));
+    let json = exec(&["rhymes", "men", "--near", "--json"], "");
+    assert!(json.out.contains("\"near\":[\""), "{}", json.out);
+}
+
+// ---- explanations for names the grammar refuses -------------------------------------------
+
+#[test]
+fn a_reserved_word_in_a_name_is_named_in_the_error() {
+    let ask = |line: &str| {
+        exec(
+            &["check", "-"],
+            &format!("Thus begins the tale of men:\n{line}\n"),
+        )
+        .err
+    };
+    let e = ask("Let the return value, a whole number, become one.");
+    assert!(e.contains("'return' has a meaning in the grammar"), "{e}");
+    let e = ask("Let the item count, a whole number, become one.");
+    assert!(e.contains("'item' has a meaning"), "{e}");
+    let e = ask("Let the a, a whole number, become one.");
+    assert!(e.contains("'a' has a meaning"), "{e}");
+    let e = ask("Let the count2, a whole number, become one.");
+    assert!(e.contains("a digit cannot be part of one"), "{e}");
+    let e = ask("Let the my_count, a whole number, become one.");
+    assert!(e.contains("names are words made of letters"), "{e}");
+    // A sentence that is wrong for another reason keeps the plain message.
+    let e = ask("Let the pile, a whole number, become.");
+    assert!(
+        e.contains("no grammar rule matches this sentence\n") || !e.contains("has a meaning"),
+        "{e}"
+    );
+}
+
+// ---- spans for statements, names and verses ------------------------------------------------
+
+fn caret_under(err: &str, text: &str) -> bool {
+    let lines: Vec<&str> = err.lines().collect();
+    lines.windows(2).any(|w| {
+        let (code, marks) = (w[0], w[1]);
+        // The caret line has the same gutter, then spaces up to the text and one `^` per char.
+        code.find(text).is_some_and(|at| {
+            marks.len() == at + text.chars().count() && marks[at..].chars().all(|c| c == '^')
+        })
+    })
+}
+
+#[test]
+fn duplicate_and_immutable_names_are_underlined() {
+    let src = "Thus begins the tale of men:\nLet the pile, a whole number, become ten.\nLet the pile, a whole number, become ten.\nThe pile shall now be ten.\n";
+    let e = exec(&["check", "-"], src).err;
+    assert!(e.contains("SXP-401") && e.contains("-:3:5"), "{e}");
+    // The caret is under the declared name, not the whole line.
+    assert!(
+        e.contains("3 | Let the pile, a whole number, become ten.\n  |     ^^^^^^^^\n"),
+        "{e}"
+    );
+    let src = "Thus begins the tale of men:\nThe pile, a whole number, shall be ten.\nThe pile shall now be one.\n";
+    let e = exec(&["check", "-"], src).err;
+    assert!(e.contains("SXP-403") && e.contains("-:3:1"), "{e}");
+    assert!(
+        e.contains("3 | The pile shall now be one.\n  | ^^^^^^^^\n"),
+        "{e}"
+    );
+}
+
+#[test]
+fn grammar_errors_underline_the_sentence() {
+    let e = exec(
+        &["check", "-"],
+        "Thus begins the tale of men:\nLet the pile become become.\nSpeak \"ten\".\n",
+    )
+    .err;
+    assert!(e.contains("SXP-103") && e.contains("-:2:1"), "{e}");
+    assert!(caret_under(&e, "Let the pile become become"), "{e}");
+}
+
+#[test]
+fn rhyme_errors_underline_the_verse_that_breaks_it() {
+    // Four verses: the second pair breaks, and the caret is on its first failing end word.
+    let src = "Thus begins the tale of men:\nSpeak \"Hello again\".\nProclaim \"ten\".\nProclaim \"Goodbye\".\n";
+    let e = exec(&["check", "-"], src).err;
+    assert!(e.contains("SXP-202") && e.contains("-:4:"), "{e}");
+    assert!(
+        caret_under(&e, "\"Goodbye\"."[..9].trim_end_matches('.')),
+        "{e}"
+    );
+    // A word the lexicon does not know is underlined where it stands.
+    let e = exec(
+        &["check", "-"],
+        "Thus begins the tale of men:\nSpeak \"zyzzyva\".\n",
+    )
+    .err;
+    assert!(
+        e.contains("SXP-301") && caret_under(&e, "\"zyzzyva\""),
+        "{e}"
+    );
+    // A lone verse.
+    let e = exec(&["check", "-"], "Thus begins the tale of men:\n").err;
+    assert!(e.contains("SXP-201") && caret_under(&e, "men"), "{e}");
+    // A verse with nothing to rhyme on.
+    let e = exec(
+        &["check", "-"],
+        "Thus begins the tale of men:\nSpeak \"42\".\n",
+    )
+    .err;
+    assert!(
+        e.contains("SXP-203") && caret_under(&e, "Speak \"42\""),
+        "{e}"
+    );
+}
+
+#[test]
+fn every_error_has_a_literary_headline_above_the_technical_line() {
+    let e = exec(
+        &["check", "-"],
+        "Thus begins the tale of men:\nLet the pile, a whole number, become \"ten\".\n",
+    )
+    .err;
+    let mut lines = e.lines();
+    assert_eq!(
+        lines.next(),
+        Some("error[SXP-402] (semantic) The types do not agree.")
+    );
+    assert!(
+        e.contains("   = declaration of \"pile\": expected Integer, found String"),
+        "{e}"
+    );
+}
+
+#[test]
+fn ir_lists_each_function_and_the_vm_matches_the_evaluator_on_every_program() {
+    let o = exec(&["ir", "-"], GOOD);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.starts_with("fn0 \"tale of men\"") && o.out.contains("entry"));
+    assert!(o.out.contains("builtin speak argc=1"));
+    assert_eq!(exec(&["ir", "--json", "-"], GOOD).code, 2);
+    assert_eq!(exec(&["ir", "-"], BAD_RHYME).code, 1);
+
+    let input = "7\n12\nsome words\n";
+    for path in programs_in("examples")
+        .into_iter()
+        .chain(programs_in("benches"))
+    {
+        let src = std::fs::read_to_string(&path).unwrap();
+        let ir = exec(&["ir", &path.to_string_lossy()], "");
+        assert_eq!(ir.code, 0, "{}: {}", path.display(), ir.err);
+        let a = syntaxeon_analysis::analyze(
+            &src,
+            syntaxeon_lexicon::lexicon::RhymeRules::default(),
+            &mut |_| {},
+        );
+        let both = std::thread::scope(|s| {
+            std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn_scoped(s, || {
+                    let (mut x, mut y) = (Vec::new(), Vec::new());
+                    let tree = syntaxeon_eval::run(&a.program, &mut input.as_bytes(), &mut x);
+                    let vm = syntaxeon_eval::run_vm(&a.program, &mut input.as_bytes(), &mut y);
+                    (tree, x, vm, y)
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        });
+        assert_eq!(both.0, both.2, "{}", path.display());
+        assert_eq!(both.1, both.3, "{}", path.display());
+    }
 }

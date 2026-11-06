@@ -11,8 +11,10 @@ Non-Monolithic Cargo workspace, a single language (Rust), one root `Justfile`. M
 - `crates/syntaxeon-lex`: lexer, verses and stanzas, end words, prosody driver (`spec/PROSE_GRAMMAR.md` §2–§3).
 - `crates/syntaxeon-syntax`: prose parser returning every reading of a sentence, lowering to the AST (`spec/PROSE_GRAMMAR.md`).
 - `crates/syntaxeon-check`: name resolution and type checking (`spec/SEMANTIC_CORE.md` §5).
-- `crates/syntaxeon-eval`: tree-walking evaluator (`spec/SEMANTIC_CORE.md` §6, ADR-013).
-- `crates/syntaxeon-cli`: the `syntaxeon` binary (`check`, `fmt`, `explain`, `ast`, `run`, `rhymes`, completions, man).
+- `crates/syntaxeon-eval`: the IR, the VM that `run` uses, and the tree-walking evaluator kept as the reference (`spec/SEMANTIC_CORE.md` §6, ADR-013, ADR-021).
+- `crates/syntaxeon-analysis`: the phases run in order, formatting, `rhythm.toml`, headlines and the phonetic verse report; shared by the CLI and the server.
+- `crates/syntaxeon-lsp`: the `syntaxeon-lsp` language server (ADR-020); the only crate with external dependencies (`lsp-server`, `lsp-types`, `serde_json`).
+- `crates/syntaxeon-cli`: the `syntaxeon` binary (`check`, `fmt`, `explain`, `ast`, `ir`, `run`, `rhymes`, completions, man).
 
 ## Standard Command Surface
 Use `just` for every common task:
@@ -55,9 +57,9 @@ just clean         # Remove build artifacts
 3. **Sentences** → `syntaxeon-syntax`: every reading of each sentence; zero is `SXP-103`, more than one distinct reading is `SXP-104`.
 4. **AST** → `syntaxeon-check`: names and types.
 5. **Verses** → `syntaxeon-lex::prosody` with `syntaxeon-lexicon`: rhyme per stanza.
-6. **AST** → `syntaxeon-eval`: execution.
+6. **AST** → `syntaxeon-eval`: lowered to the IR and run by the VM (the tree evaluator must give identical results).
 
-Phases run in that order (prosody after semantics) and checking stops at the first phase that reports errors. Pronunciation comes only from the vendored lexicon; never add a host-dependent source.
+Phases run in that order (prosody after semantics) and checking stops at the first phase that reports errors. Pronunciation comes only from the vendored lexicon; never add a host-dependent source. Rhyme strictness comes only from the project's `rhythm.toml` (`crates/syntaxeon-cli/src/rhythm.rs`, `spec/PROSODY.md` §12), never from a flag or the environment.
 
 ## Coding Conventions
 - Rust 2024, toolchain pinned in `rust-toolchain.toml`; `rustfmt` with a 100-column limit.

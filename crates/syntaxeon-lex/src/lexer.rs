@@ -135,6 +135,13 @@ impl Lexer<'_> {
                     self.i += 1;
                     self.push(Tok::Punct(c), pos);
                 }
+                '_' => {
+                    self.err(
+                        "SXP-101",
+                        "unknown token '_': names are words made of letters, hyphens and apostrophes; write two words instead",
+                    );
+                    self.i += 1;
+                }
                 _ => {
                     self.err("SXP-101", &format!("unknown token {c:?}"));
                     self.i += 1;

@@ -3,9 +3,10 @@
 use std::io::Write;
 
 use syntaxeon_lexicon::lexicon::Lexicon;
-use syntaxeon_lexicon::rhyme::{rhymes_with, tail_string};
+use syntaxeon_lexicon::rhyme::{near_rhymes_with, rhymes_with, tail_string};
 
 use crate::args::Opts;
+use syntaxeon_analysis::rhythm;
 
 const DEFAULT_LIMIT: usize = 40;
 
@@ -41,6 +42,30 @@ pub fn run(word: &str, opts: Opts, out: &mut dyn Write, err: &mut dyn Write) -> 
         None => DEFAULT_LIMIT,
     };
     let shown = &candidates[..candidates.len().min(limit)];
+    // Near (assonant) rhymes come after the perfect ones, and only if the project allows them.
+    let near_allowed = match rhythm::load("-") {
+        Ok(r) => r.rules.assonance,
+        Err(msg) => {
+            let _ = writeln!(err, "{msg}");
+            return 1;
+        }
+    };
+    let near_all: Vec<&str> = if opts.near && near_allowed {
+        near_rhymes_with(&lex, &key)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|w| opts.all || lex.is_common(w))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let near = &near_all[..near_all.len().min(limit)];
+    if opts.near && !near_allowed && !opts.quiet {
+        let _ = writeln!(
+            err,
+            "note: assonance is off in rhythm.toml, so there are no near rhymes"
+        );
+    }
     if opts.json {
         let tail = lex
             .lookup(&key)
@@ -49,15 +74,23 @@ pub fn run(word: &str, opts: Opts, out: &mut dyn Write, err: &mut dyn Write) -> 
             .unwrap_or_default();
         let _ = writeln!(
             out,
-            "{{\"word\":\"{key}\",\"tail\":\"{tail}\",\"total\":{},\"shown\":{},\"rhymes\":{}}}",
+            "{{\"word\":\"{key}\",\"tail\":\"{tail}\",\"total\":{},\"shown\":{},\"rhymes\":{},\"near\":{}}}",
             candidates.len(),
             shown.len(),
-            json_list(shown)
+            json_list(shown),
+            json_list(near)
         );
         return 0;
     }
-    for w in shown {
+    for w in shown.iter().chain(near) {
         let _ = writeln!(out, "{w}");
+    }
+    if !near.is_empty() && !opts.quiet {
+        let _ = writeln!(
+            err,
+            "note: the last {} word(s) rhyme only by assonance",
+            near.len()
+        );
     }
     if shown.len() < candidates.len() && !opts.quiet {
         let _ = writeln!(
@@ -72,7 +105,7 @@ pub fn run(word: &str, opts: Opts, out: &mut dyn Write, err: &mut dyn Write) -> 
             }
         );
     }
-    if shown.is_empty() && !opts.quiet {
+    if shown.is_empty() && near.is_empty() && !opts.quiet {
         let _ = writeln!(err, "note: no rhymes found for '{word}'; try --all");
     }
     0

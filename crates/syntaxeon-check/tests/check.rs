@@ -267,3 +267,41 @@ fn program_level_errors() {
         "SXP-408"
     );
 }
+
+#[test]
+fn the_primitives_have_the_documented_types() {
+    assert_eq!(
+        entry("Let the n, a whole number, become the code of the letter \"a\"."),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        entry("Let the c, a letter, become the letter with code 97."),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        entry("Let the b, a truth, become there is more to hear."),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        entry("Let the b, a truth, become \"12\" reads as a whole number."),
+        Vec::<&str>::new()
+    );
+    // Wrong operand types are ordinary type errors.
+    assert_eq!(
+        entry("Let the n, a whole number, become the code of 5."),
+        ["SXP-402"]
+    );
+    assert_eq!(
+        entry("Let the c, a letter, become the letter with code \"a\"."),
+        ["SXP-402"]
+    );
+    assert_eq!(
+        entry("Let the b, a truth, become 5 reads as a whole number."),
+        ["SXP-402"]
+    );
+    // They return the types they promise, not others.
+    assert_eq!(
+        entry("Let the n, a text, become the code of the letter \"a\"."),
+        ["SXP-402"]
+    );
+}

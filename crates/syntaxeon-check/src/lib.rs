@@ -13,7 +13,7 @@ use syntaxeon_core::{
 };
 use syntaxeon_lex::Diagnostic;
 
-const BUILTINS: [&str; 8] = [
+const BUILTINS: [&str; 12] = [
     "speak",
     "speakln",
     "hear",
@@ -22,6 +22,10 @@ const BUILTINS: [&str; 8] = [
     "to_string",
     "to_integer",
     "to_float",
+    "to_code",
+    "to_letter",
+    "has_input",
+    "reads_as_integer",
 ];
 
 /// A binding's type (`None` once poisoned by an earlier error) and mutability.
@@ -59,6 +63,7 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
     }
     for s in &program.stanzas {
         cx.line = s.line;
+        cx.span = (!s.span.is_empty()).then_some(s.span);
         if BUILTINS.contains(&s.title.as_str()) {
             cx.err(
                 "SXP-407",
@@ -131,6 +136,7 @@ impl Cx<'_> {
 
     fn stanza(&mut self, s: &Stanza) {
         self.line = s.line;
+        self.span = (!s.span.is_empty()).then_some(s.span);
         self.ret = s.ret.clone();
         self.is_entry = s.id == 0;
         let mut scope: HashMap<String, Binding> = HashMap::new();
@@ -153,6 +159,7 @@ impl Cx<'_> {
         self.scopes.clear();
         if s.ret != Type::Unit && !always_returns(&s.body) {
             self.line = s.line;
+            self.span = (!s.span.is_empty()).then_some(s.span);
             self.err(
                 "SXP-404",
                 &format!("{:?} does not return a value on every path", s.title),
@@ -179,7 +186,8 @@ impl Cx<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         self.line = s.line;
-        self.span = None;
+        // Errors about the statement itself point at its name or target (or the whole sentence).
+        self.span = (!s.focus.is_empty()).then_some(s.focus);
         match &s.kind {
             StmtKind::Decl {
                 name,
@@ -458,7 +466,7 @@ impl Cx<'_> {
 
     fn builtin(&mut self, name: &str, args: &[Expr]) -> Option<Type> {
         let arity = match name {
-            "hear" => 0,
+            "hear" | "has_input" => 0,
             "append" => 2,
             _ => 1,
         };
@@ -472,6 +480,9 @@ impl Cx<'_> {
         if name == "hear" {
             return Some(Type::String);
         }
+        if name == "has_input" {
+            return Some(Type::Boolean);
+        }
         if name == "append" {
             let Type::List(elem) = self.infer(&args[0], None)? else {
                 self.err("SXP-402", "'appended' needs a list on the left");
@@ -484,11 +495,14 @@ impl Cx<'_> {
         let (ok, out) = match (name, &t) {
             ("speak" | "speakln", Type::String) => (true, Type::Unit),
             ("length", Type::List(_) | Type::String)
-            | ("to_integer", Type::Float | Type::String) => (true, Type::Integer),
+            | ("to_integer", Type::Float | Type::String)
+            | ("to_code", Type::Character) => (true, Type::Integer),
             ("to_string", Type::Integer | Type::Float | Type::Boolean | Type::Character) => {
                 (true, Type::String)
             }
             ("to_float", Type::Integer) => (true, Type::Float),
+            ("to_letter", Type::Integer) => (true, Type::Character),
+            ("reads_as_integer", Type::String) => (true, Type::Boolean),
             _ => (false, Type::Unit),
         };
         if ok {

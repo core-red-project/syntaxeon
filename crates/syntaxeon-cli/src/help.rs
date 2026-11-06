@@ -13,6 +13,7 @@ pub fn help(s: Style) -> String {
   {check}        Check syntax, types and rhyme; exit 1 if the program is not valid\n\
   {explain}      Show how each stanza reads, its end-word tails and rhyme scheme\n\
   {ast}          Dump the canonical AST\n\
+  {ir}           Dump the intermediate representation the VM runs\n\
   {fmt}        Print the program in canonical form, keeping its meaning and its rhymes\n\
   {run}          Check, then run the program (input for 'hear' comes from stdin)\n\
   {rhymes}      List words that rhyme with a word, to find a partner for a verse\n\
@@ -26,6 +27,7 @@ pub fn help(s: Style) -> String {
   {j}              Machine-readable output (check and rhymes)\n\
   {lim}      With rhymes: how many words to show (default 40, 0 = all)\n\
   {al}             With rhymes: include words that do not look common\n\
+  {nr}          With rhymes: also list words that rhyme only by assonance\n\
   {wr}         With fmt: rewrite the file in place\n\
   {ck}         With fmt: change nothing; exit 1 if the file is not formatted\n\
   {nc}          Disable color (also: NO_COLOR, or output not a terminal)\n\n\
@@ -46,6 +48,7 @@ Use '-' as the file to read standard input. Exit codes: 0 ok, 1 invalid program 
         check = c("check <file>"),
         explain = c("explain <file>"),
         ast = c("ast <file>"),
+        ir = c("ir <file>"),
         fmt = c("fmt <file>"),
         run = c("run <file>"),
         rhymes = c("rhymes <word>"),
@@ -63,6 +66,7 @@ Use '-' as the file to read standard input. Exit codes: 0 ok, 1 invalid program 
         j = f("--json"),
         lim = f("--limit <n>"),
         al = f("--all"),
+        nr = f("--near"),
         wr = f("--write"),
         ck = f("--check"),
         nc = f("--no-color"),
@@ -80,16 +84,16 @@ Use '-' as the file to read standard input. Exit codes: 0 ok, 1 invalid program 
 pub fn completions(shell: &str) -> Option<&'static str> {
     Some(match shell {
         "bash" => {
-            "_syntaxeon() {\n  local cur=\"${COMP_WORDS[COMP_CWORD]}\"\n  COMPREPLY=( $(compgen -W \"check fmt explain ast run rhymes completions help version --help --version --quiet --verbose --json --no-color --limit --all --write --check\" -- \"$cur\") )\n}\ncomplete -F _syntaxeon syntaxeon\n"
+            "_syntaxeon() {\n  local cur=\"${COMP_WORDS[COMP_CWORD]}\"\n  COMPREPLY=( $(compgen -W \"check fmt explain ast ir run rhymes completions help version --help --version --quiet --verbose --json --no-color --limit --all --near --write --check\" -- \"$cur\") )\n}\ncomplete -F _syntaxeon syntaxeon\n"
         }
         "zsh" => {
-            "#compdef syntaxeon\n_arguments \\\n  '(-h --help)'{-h,--help}'[show help]' \\\n  '(-V --version)'{-V,--version}'[print version]' \\\n  '(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \\\n  '(-v --verbose)'{-v,--verbose}'[print each phase]' \\\n  '--json[machine-readable output]' \\\n  '--limit[how many rhymes to show]:n' \\\n  '--all[include uncommon words]' \\\n  '--no-color[disable color]' \\\n  '1:command:(check fmt explain ast run rhymes completions help version)' \\\n  '*:file:_files'\n"
+            "#compdef syntaxeon\n_arguments \\\n  '(-h --help)'{-h,--help}'[show help]' \\\n  '(-V --version)'{-V,--version}'[print version]' \\\n  '(-q --quiet)'{-q,--quiet}'[suppress non-error output]' \\\n  '(-v --verbose)'{-v,--verbose}'[print each phase]' \\\n  '--json[machine-readable output]' \\\n  '--limit[how many rhymes to show]:n' \\\n  '--all[include uncommon words]' \\\n  '--near[include assonant rhymes]' \\\n  '--no-color[disable color]' \\\n  '1:command:(check fmt explain ast ir run rhymes completions help version)' \\\n  '*:file:_files'\n"
         }
         "fish" => {
-            "complete -c syntaxeon -f -n __fish_use_subcommand -a 'check fmt explain ast run rhymes completions help version'\ncomplete -c syntaxeon -s h -l help -d 'show help'\ncomplete -c syntaxeon -s V -l version -d 'print version'\ncomplete -c syntaxeon -s q -l quiet -d 'suppress non-error output'\ncomplete -c syntaxeon -s v -l verbose -d 'print each phase'\ncomplete -c syntaxeon -l json -d 'machine-readable output'\ncomplete -c syntaxeon -l limit -d 'how many rhymes to show'\ncomplete -c syntaxeon -l all -d 'include uncommon words'\ncomplete -c syntaxeon -l no-color -d 'disable color'\n"
+            "complete -c syntaxeon -f -n __fish_use_subcommand -a 'check fmt explain ast ir run rhymes completions help version'\ncomplete -c syntaxeon -s h -l help -d 'show help'\ncomplete -c syntaxeon -s V -l version -d 'print version'\ncomplete -c syntaxeon -s q -l quiet -d 'suppress non-error output'\ncomplete -c syntaxeon -s v -l verbose -d 'print each phase'\ncomplete -c syntaxeon -l json -d 'machine-readable output'\ncomplete -c syntaxeon -l limit -d 'how many rhymes to show'\ncomplete -c syntaxeon -l all -d 'include uncommon words'\ncomplete -c syntaxeon -l near -d 'include assonant rhymes'\ncomplete -c syntaxeon -l no-color -d 'disable color'\n"
         }
         "powershell" => {
-            "Register-ArgumentCompleter -Native -CommandName syntaxeon -ScriptBlock {\n  param($wordToComplete)\n  'check','fmt','explain','ast','run','rhymes','completions','help','version','--help','--version','--quiet','--verbose','--json','--no-color' |\n    Where-Object { $_ -like \"$wordToComplete*\" } |\n    ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }\n}\n"
+            "Register-ArgumentCompleter -Native -CommandName syntaxeon -ScriptBlock {\n  param($wordToComplete)\n  'check','fmt','explain','ast','ir','run','rhymes','completions','help','version','--help','--version','--quiet','--verbose','--json','--no-color' |\n    Where-Object { $_ -like \"$wordToComplete*\" } |\n    ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }\n}\n"
         }
         _ => return None,
     })
@@ -98,6 +102,6 @@ pub fn completions(shell: &str) -> Option<&'static str> {
 pub fn man() -> String {
     let v = env!("CARGO_PKG_VERSION");
     format!(
-        ".TH SYNTAXEON 1 \"\" \"syntaxeon {v}\"\n.SH NAME\nsyntaxeon \\- check and explain programs written in prose that must also rhyme\n.SH SYNOPSIS\n.B syntaxeon\n<command> [options] <file>\n.SH COMMANDS\n.TP\n.B check\nCheck syntax, types and rhyme.\n.TP\n.B explain\nShow each stanza's end-word tails and rhyme scheme.\n.TP\n.B ast\nDump the canonical AST.\n.TP\n.B fmt\nPrint the program in canonical form, keeping its meaning and rhymes.\n.TP\n.B run\nCheck, then run the program.\n.TP\n.B rhymes\nList words that rhyme with a word.\n.TP\n.B completions\nPrint a shell completion script.\n.SH EXIT STATUS\n0 success, 1 invalid program or I/O failure, 2 usage error.\n"
+        ".TH SYNTAXEON 1 \"\" \"syntaxeon {v}\"\n.SH NAME\nsyntaxeon \\- check and explain programs written in prose that must also rhyme\n.SH SYNOPSIS\n.B syntaxeon\n<command> [options] <file>\n.SH COMMANDS\n.TP\n.B check\nCheck syntax, types and rhyme.\n.TP\n.B explain\nShow each stanza's end-word tails and rhyme scheme.\n.TP\n.B ast\nDump the canonical AST.\n.TP\n.B ir\nDump the intermediate representation the VM runs.\n.TP\n.B fmt\nPrint the program in canonical form, keeping its meaning and rhymes.\n.TP\n.B run\nCheck, then run the program.\n.TP\n.B rhymes\nList words that rhyme with a word.\n.TP\n.B completions\nPrint a shell completion script.\n.SH EXIT STATUS\n0 success, 1 invalid program or I/O failure, 2 usage error.\n"
     )
 }

@@ -2,7 +2,7 @@
 
 use crate::rules::{
     COMPARE, CONVERSIONS, DETS, FORMS, HEADERS, HeaderKind, INFIX, JOIN, Make, PREFIX_ARITH,
-    PREFIX_CALL, PREFIX_UNARY, RESERVED, SIMPLE_TYPES, SPEAK, Step, THE_HEADS, number_word,
+    PREFIX_CALL, PREFIX_UNARY, RESERVED, SIMPLE_TYPES, SPEAK, Step, TESTS, ZERO_ARG, number_word,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -126,6 +126,21 @@ impl P<'_> {
             .then_some(i + ws.len())
     }
 
+    /// Whether the words at `i`, just after `the`, start a prefix form (`the sum of …`) or a
+    /// letter literal (`the letter "a"`). Any other word is free to start a name, so `sum`,
+    /// `length` or `text` can name a variable unless `of` follows (`spec/PROSE_GRAMMAR.md` §9).
+    fn begins_prefix_form(&self, i: usize) -> bool {
+        let leads = PREFIX_ARITH
+            .iter()
+            .map(|(ws, _)| *ws)
+            .chain(PREFIX_CALL.iter().map(|(ws, _)| *ws))
+            .chain(PREFIX_UNARY.iter().map(|(ws, _)| *ws));
+        leads
+            .filter(|ws| ws.first() == Some(&"the"))
+            .any(|ws| self.seq(i, &ws[1..]).is_some())
+            || (self.word(i, "letter") && matches!(self.t.get(i + 1), Some(Tok::Str(_))))
+    }
+
     // ---- names and types -------------------------------------------------------------
 
     /// `[determiner] word { word }`; a quoted string is a name too where `quoted` is set.
@@ -141,7 +156,7 @@ impl P<'_> {
         };
         let start = i + usize::from(det.is_some());
         let first_bad = match (det, self.t.get(start)) {
-            (Some("the"), Some(Tok::Word(w))) => THE_HEADS.contains(&w.as_str()),
+            (Some("the"), Some(_)) => self.begins_prefix_form(start),
             (Some("a" | "an"), Some(Tok::Word(w))) => w == "list" || w == "empty",
             _ => false,
         };
@@ -242,8 +257,10 @@ impl P<'_> {
                 out.push((Expr::Char(c), j + 1));
             }
         }
-        if let Some(j) = self.seq(i, &["what", "is", "heard"]) {
-            out.push((Expr::Call("hear".into(), vec![]), j));
+        for (ws, f) in ZERO_ARG {
+            if let Some(j) = self.seq(i, ws) {
+                out.push((Expr::Call(f.into(), vec![]), j));
+            }
         }
         if let Some(j) = self.seq(i, &["calling"]) {
             for (n, k) in self.name(j, NameKind::Title, false) {
@@ -433,6 +450,13 @@ impl P<'_> {
                 }
             }
         }
+        for (a, j) in self.operand(i).into_iter().filter(|(a, _)| !open_tail(a)) {
+            for (ws, f) in TESTS {
+                if let Some(k) = self.seq(j, ws) {
+                    out.push((Expr::Call(f.into(), vec![a.clone()]), k));
+                }
+            }
+        }
         for (opener, sep, op) in JOIN {
             if let Some(j) = self.seq(i, &[opener]) {
                 self.pair(j, sep, op, &|k| self.expr(k), &mut out);
@@ -485,31 +509,42 @@ impl P<'_> {
     }
 
     /// All parses of one whole simple sentence (terminator already removed).
-    pub(crate) fn statement(&self) -> Vec<StmtKind> {
+    pub(crate) fn statement(&self) -> Vec<(StmtKind, Span)> {
         let mut out = self.forms();
-        out.extend(self.actions());
+        out.extend(self.actions().into_iter().map(|k| (k, Span::default())));
         out
     }
 
     /// Declarations and assignments, read from the [`FORMS`] table.
-    fn forms(&self) -> Vec<StmtKind> {
+    fn forms(&self) -> Vec<(StmtKind, Span)> {
         let mut out = Vec::new();
         for form in FORMS {
+            // The name or target step is what an error about the statement is about.
+            let focus_step = form
+                .steps
+                .iter()
+                .position(|st| matches!(st, Step::Name | Step::Target));
             let mut done = Vec::new();
             self.run_steps(form.steps, 0, Slots::default(), &mut done);
-            out.extend(done.into_iter().filter_map(|s| match form.make {
-                Make::Decl => Some(StmtKind::Decl {
-                    name: s.name?,
-                    ty: s.ty,
-                    mutable: s.mutable,
-                    init: s.expr?,
-                }),
-                Make::Assign => Some(StmtKind::Assign {
-                    target: s.target?,
-                    value: s.expr?,
-                }),
-                Make::Return => Some(StmtKind::Return(Some(s.expr?))),
-                Make::Nothing => Some(StmtKind::Return(None)),
+            out.extend(done.into_iter().filter_map(|s| {
+                let focus = focus_step
+                    .and_then(|k| s.spans.get(k))
+                    .map_or(Span::default(), |&(a, b)| self.span(a, b));
+                let kind = match form.make {
+                    Make::Decl => StmtKind::Decl {
+                        name: s.name?,
+                        ty: s.ty,
+                        mutable: s.mutable,
+                        init: s.expr?,
+                    },
+                    Make::Assign => StmtKind::Assign {
+                        target: s.target?,
+                        value: s.expr?,
+                    },
+                    Make::Return => StmtKind::Return(Some(s.expr?)),
+                    Make::Nothing => StmtKind::Return(None),
+                };
+                Some((kind, focus))
             }));
         }
         out

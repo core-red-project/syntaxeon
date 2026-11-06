@@ -13,3 +13,10 @@ common_words_revision = "ESDB git 1e5b7d3 (2026-06-24)"
 common_words_file = "common-words.txt"
 common_words_sha256 = "338a516856f72ac9970a1c2940c6e370df3b1d2e21f322085f3d2ca27f96b66b"
 common_words_license = "lexicon/COMMON-WORDS-LICENSE"
+
+# Frequency tiers that order `syntaxeon rhymes` (not used by the rhyme check itself).
+word_tiers_source = "https://sourceforge.net/projects/wordlist/files/SCOWL/2020.12.07/scowl-2020.12.07.tar.gz (SCOWL v1, sha256 5587667caa20c4891390c2d42dbb4d5c4c3f41bee77af1457ece3ba23fb859cc)"
+word_tiers_parameters = "final/english-words.N and final/american-words.N for N = 10 and 20, lowercase a-z words only; a word in 10 is tier 10, else in 20 is tier 20"
+word_tiers_file = "word-tiers.txt"
+word_tiers_sha256 = "b04ad13336bacb80b829a0871739567365f5067246fde6fc7b5a454293313489"
+word_tiers_license = "lexicon/WORD-TIERS-LICENSE"

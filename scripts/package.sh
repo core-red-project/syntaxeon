@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Archives the release build for $TARGET into dist/ as syntaxeon-<version>-<target>.<ext>
-# (tar.gz on Linux and macOS, zip on Windows). The archive holds the binary, LICENSE,
-# README.md, the man page and the shell completions, all at the paths below.
+# (tar.gz on Linux and macOS, zip on Windows). The archive holds the binaries (the CLI and
+# the language server), LICENSE, README.md, the man page and the shell completions, all at
+# the paths below.
 set -euo pipefail
 
 : "${TARGET:?set TARGET to a Rust target triple}"
@@ -13,14 +14,15 @@ case "$TARGET" in
   *) echo "unsupported TARGET: $TARGET" >&2; exit 1 ;;
 esac
 
-cargo build --release --locked --target "$TARGET" -p syntaxeon-cli
+cargo build --release --locked --target "$TARGET" -p syntaxeon-cli -p syntaxeon-lsp
 bin="target/$TARGET/release/syntaxeon$ext"
+lsp="target/$TARGET/release/syntaxeon-lsp$ext"
 
 name="syntaxeon-$VERSION-$TARGET"
 stage="dist/$name"
 rm -rf "$stage"
 mkdir -p "$stage/man" "$stage/completions"
-cp "$bin" LICENSE README.md "$stage/"
+cp "$bin" "$lsp" LICENSE README.md "$stage/"
 "$bin" man > "$stage/man/syntaxeon.1"
 "$bin" completions bash > "$stage/completions/syntaxeon.bash"
 "$bin" completions zsh > "$stage/completions/_syntaxeon"

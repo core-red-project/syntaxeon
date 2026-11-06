@@ -1,12 +1,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // integration tests: a panic is the failure report
 //! Rhyme and stanza fuzzing against an independent oracle written straight from
-//! `spec/PROSODY.md` §4 and §7 over the raw dictionary text (no shared code with the crate).
+//! `spec/PROSODY.md` §4 and §7 over the raw dictionary text (no shared code with the crate), in
+//! both modes: perfect rhyme only, and perfect rhyme plus assonance (the default).
 //!
 //! Deterministic xorshift; `SYNTAXEON_FUZZ_ITERS` and `SYNTAXEON_FUZZ_SEED` scale a run.
 
 use std::collections::HashMap;
-use syntaxeon_lexicon::lexicon::Lexicon;
-use syntaxeon_lexicon::rhyme::{rhymes_with, words_rhyme};
+use syntaxeon_lexicon::lexicon::{Lexicon, RhymeRules};
+use syntaxeon_lexicon::rhyme::{RhymeKind, rhyme_kind, rhymes_with, words_rhyme};
 use syntaxeon_lexicon::scheme::{find_scheme, schemes};
 
 const DICT: &str = include_str!("../lexicon/cmudict.dict");
@@ -44,30 +45,35 @@ fn oracle() -> Oracle {
     m
 }
 
-/// (tail without stress digits, onset) per §4.
-fn split(p: &[String]) -> Option<(Vec<String>, Option<String>)> {
+/// (tail without stress digits, onset, vowels of the tail) per §4.
+type Parts = (Vec<String>, Option<String>, Vec<String>);
+
+fn split(p: &[String]) -> Option<Parts> {
     let ends = |d: char| p.iter().rposition(|t| t.ends_with(d));
     let idx = ends('1')
         .or_else(|| ends('2'))
         .or_else(|| p.iter().rposition(|t| t.ends_with(char::is_numeric)))?;
-    let tail = p[idx..]
+    let bare = |t: &String| t.trim_end_matches(char::is_numeric).to_string();
+    let tail = p[idx..].iter().map(bare).collect();
+    let vowels = p[idx..]
         .iter()
-        .map(|t| t.trim_end_matches(char::is_numeric).to_string())
+        .filter(|t| t.ends_with(char::is_numeric))
+        .map(bare)
         .collect();
-    Some((
-        tail,
-        idx.checked_sub(1)
-            .map(|i| p[i].trim_end_matches(char::is_numeric).to_string()),
-    ))
+    Some((tail, idx.checked_sub(1).map(|i| bare(&p[i])), vowels))
 }
 
-fn rhyme(o: &Oracle, a: &str, b: &str) -> bool {
-    o[a].iter().any(|x| {
-        o[b].iter().any(|y| match (split(x), split(y)) {
-            (Some((tx, ox)), Some((ty, oy))) => tx == ty && ox != oy,
-            _ => false,
+fn rhyme(o: &Oracle, a: &str, b: &str, assonance: bool) -> bool {
+    a != b
+        && o[a].iter().any(|x| {
+            o[b].iter().any(|y| match (split(x), split(y)) {
+                (Some((tx, ox, vx)), Some((ty, oy, vy))) => {
+                    let identical = tx == ty && ox == oy;
+                    (tx == ty && ox != oy) || (assonance && !identical && vx == vy)
+                }
+                _ => false,
+            })
         })
-    })
 }
 
 fn oracle_schemes(n: usize) -> Vec<Vec<usize>> {
@@ -86,12 +92,11 @@ fn oracle_schemes(n: usize) -> Vec<Vec<usize>> {
     out
 }
 
-fn stanza_ok(o: &Oracle, words: &[&str]) -> bool {
+fn stanza_ok(o: &Oracle, words: &[&str], assonance: bool) -> bool {
     oracle_schemes(words.len()).iter().any(|s| {
-        s.iter().enumerate().all(|(i, g)| {
-            let first = s.iter().position(|x| x == g).unwrap();
-            first == i || rhyme(o, words[first], words[i])
-        })
+        // Every pair inside a group rhymes.
+        (0..s.len())
+            .all(|i| (0..i).all(|j| s[j] != s[i] || rhyme(o, words[j], words[i], assonance)))
     })
 }
 
@@ -99,8 +104,19 @@ struct Fixture {
     lex: Lexicon,
     oracle: Oracle,
     words: Vec<String>,
-    /// words by rhyme tail of their first pronunciation, groups of two or more only
+    /// words by rhyme tail of their first pronunciation, groups of three or more only
     groups: Vec<Vec<String>>,
+    /// the same by the vowels of the tail (assonance)
+    vgroups: Vec<Vec<String>>,
+}
+
+impl Fixture {
+    /// The lexicon under the rules of one mode.
+    fn lex(&self, assonance: bool) -> Lexicon {
+        let mut lex = self.lex.clone();
+        lex.set_rhyme_rules(RhymeRules { assonance });
+        lex
+    }
 }
 
 fn fixture() -> Fixture {
@@ -113,53 +129,93 @@ fn fixture() -> Fixture {
         .collect();
     words.sort();
     let mut by_tail: HashMap<Vec<String>, Vec<String>> = HashMap::new();
+    let mut by_vowels: HashMap<Vec<String>, Vec<String>> = HashMap::new();
     for w in &words {
-        if let Some((t, _)) = split(&oracle[w][0]) {
+        if let Some((t, _, v)) = split(&oracle[w][0]) {
             by_tail.entry(t).or_default().push(w.clone());
+            by_vowels.entry(v).or_default().push(w.clone());
         }
     }
-    let mut groups: Vec<Vec<String>> = by_tail.into_values().filter(|g| g.len() >= 3).collect();
-    groups.sort();
+    let collect = |m: HashMap<Vec<String>, Vec<String>>| {
+        let mut g: Vec<Vec<String>> = m.into_values().filter(|g| g.len() >= 3).collect();
+        g.sort();
+        g
+    };
     Fixture {
         lex,
         oracle,
         words,
-        groups,
+        groups: collect(by_tail),
+        vgroups: collect(by_vowels),
     }
 }
 
 #[test]
 fn word_pairs_agree_with_the_oracle_and_are_symmetric() {
     let f = fixture();
-    let mut r = Rng(env_or("SYNTAXEON_FUZZ_SEED", 0x9E37_79B9_7F4A_7C15));
     let iters = env_or("SYNTAXEON_FUZZ_ITERS", 20_000);
-    let mut yes = 0;
-    for _ in 0..iters {
-        // Half the pairs come from one tail group so that rhymes actually occur.
-        let (a, b) = if r.below(2) == 0 {
-            (
-                &f.words[r.below(f.words.len())],
-                &f.words[r.below(f.words.len())],
-            )
-        } else {
-            let g = &f.groups[r.below(f.groups.len())];
-            (&g[r.below(g.len())], &g[r.below(g.len())])
-        };
-        let got = words_rhyme(&f.lex, a, b).unwrap();
-        assert_eq!(got, rhyme(&f.oracle, a, b), "{a}/{b}");
-        assert_eq!(got, words_rhyme(&f.lex, b, a).unwrap(), "symmetry {a}/{b}");
-        yes += usize::from(got);
-    }
-    assert!(
-        yes * 20 > usize::try_from(iters).unwrap(),
-        "too few rhyming pairs: {yes}"
-    );
-    for w in f.words.iter().take(300) {
+    for assonance in [false, true] {
+        let lex = f.lex(assonance);
+        let mut r = Rng(env_or("SYNTAXEON_FUZZ_SEED", 0x9E37_79B9_7F4A_7C15));
+        let mut yes = 0;
+        for _ in 0..iters {
+            // A third of the pairs are random, the rest come from one tail group or one vowel
+            // group so that rhymes (and near rhymes) actually occur.
+            let (a, b) = match r.below(3) {
+                0 => (
+                    &f.words[r.below(f.words.len())],
+                    &f.words[r.below(f.words.len())],
+                ),
+                k => {
+                    let gs = if k == 1 { &f.groups } else { &f.vgroups };
+                    let g = &gs[r.below(gs.len())];
+                    (&g[r.below(g.len())], &g[r.below(g.len())])
+                }
+            };
+            let got = words_rhyme(&lex, a, b).unwrap();
+            assert_eq!(
+                got,
+                rhyme(&f.oracle, a, b, assonance),
+                "{a}/{b} (assonance {assonance})"
+            );
+            assert_eq!(got, words_rhyme(&lex, b, a).unwrap(), "symmetry {a}/{b}");
+            yes += usize::from(got);
+        }
         assert!(
-            !words_rhyme(&f.lex, w, w).unwrap(),
-            "{w} rhymes with itself"
+            yes * 20 > usize::try_from(iters).unwrap(),
+            "too few rhyming pairs: {yes} (assonance {assonance})"
         );
+        for w in f.words.iter().take(300) {
+            assert!(!words_rhyme(&lex, w, w).unwrap(), "{w} rhymes with itself");
+        }
     }
+}
+
+/// Assonance only adds rhymes: whatever rhymes perfectly still rhymes, and a pair that rhymes
+/// only by assonance rhymes exactly when the project allows it.
+#[test]
+fn assonance_only_widens_what_rhymes() {
+    let fixture = fixture();
+    let (strict, loose) = (fixture.lex(false), fixture.lex(true));
+    let mut rng = Rng(env_or("SYNTAXEON_FUZZ_SEED", 0xA550) + 3);
+    let mut widened = 0;
+    for _ in 0..env_or("SYNTAXEON_FUZZ_ITERS", 20_000) {
+        let group = &fixture.vgroups[rng.below(fixture.vgroups.len())];
+        let (first, second) = (
+            &group[rng.below(group.len())],
+            &group[rng.below(group.len())],
+        );
+        let (was, is) = (
+            words_rhyme(&strict, first, second).unwrap(),
+            words_rhyme(&loose, first, second).unwrap(),
+        );
+        assert!(
+            !was || is,
+            "{first}/{second} rhymes perfectly but not with assonance on"
+        );
+        widened += usize::from(!was && is);
+    }
+    assert!(widened > 100, "assonance never mattered: {widened}");
 }
 
 #[test]
@@ -175,7 +231,7 @@ fn rhyme_lists_match_pairwise_verdicts() {
         }
         for _ in 0..25 {
             let x = &f.words[r.below(f.words.len())];
-            let want = x != w && rhyme(&f.oracle, w, x);
+            let want = x != w && rhyme(&f.oracle, w, x, false);
             assert_eq!(list.contains(&x.as_str()), want, "{w}/{x}");
         }
     }
@@ -191,37 +247,100 @@ fn scheme_tables_agree() {
 #[test]
 fn stanzas_agree_with_the_oracle() {
     let f = fixture();
-    let mut r = Rng(env_or("SYNTAXEON_FUZZ_SEED", 0x1234_5678_9ABC_DEF1));
-    let (mut valid, mut invalid) = (0, 0);
-    for _ in 0..env_or("SYNTAXEON_FUZZ_ITERS", 20_000) {
-        let n = 1 + r.below(8);
-        let mut verses: Vec<String> = Vec::new();
-        // Build from one or two tail groups, then sometimes corrupt one verse.
-        let g1 = &f.groups[r.below(f.groups.len())];
-        let g2 = &f.groups[r.below(f.groups.len())];
-        for i in 0..n {
-            let g = if (i / 2) % 2 == 0 || r.below(4) == 0 {
-                g1
+    for assonance in [false, true] {
+        let lex = f.lex(assonance);
+        let mut r = Rng(env_or("SYNTAXEON_FUZZ_SEED", 0x1234_5678_9ABC_DEF1));
+        let (mut valid, mut invalid) = (0, 0);
+        for _ in 0..env_or("SYNTAXEON_FUZZ_ITERS", 20_000) {
+            let n = 1 + r.below(8);
+            let mut verses: Vec<String> = Vec::new();
+            // Build from one or two groups, then sometimes corrupt one verse.
+            let gs = if assonance && r.below(2) == 0 {
+                &f.vgroups
             } else {
-                g2
+                &f.groups
             };
-            verses.push(g[r.below(g.len())].clone());
+            let g1 = &gs[r.below(gs.len())];
+            let g2 = &gs[r.below(gs.len())];
+            for i in 0..n {
+                let g = if (i / 2) % 2 == 0 || r.below(4) == 0 {
+                    g1
+                } else {
+                    g2
+                };
+                verses.push(g[r.below(g.len())].clone());
+            }
+            if r.below(3) == 0 {
+                let i = r.below(n);
+                verses[i] = f.words[r.below(f.words.len())].clone();
+            }
+            let refs: Vec<&str> = verses.iter().map(String::as_str).collect();
+            let got = find_scheme(&lex, &refs);
+            let want = n >= 2 && stanza_ok(&f.oracle, &refs, assonance);
+            assert_eq!(got.is_ok(), want, "{refs:?} (assonance {assonance})");
+            if let Ok(s) = &got {
+                assert!(oracle_schemes(n).contains(s), "{refs:?} -> {s:?}");
+            }
+            if want {
+                valid += 1;
+            } else {
+                invalid += 1;
+            }
         }
-        if r.below(3) == 0 {
-            let i = r.below(n);
-            verses[i] = f.words[r.below(f.words.len())].clone();
-        }
-        let refs: Vec<&str> = verses.iter().map(String::as_str).collect();
-        let got = find_scheme(&f.lex, &refs);
-        let want = n >= 2 && stanza_ok(&f.oracle, &refs);
-        assert_eq!(got.is_ok(), want, "{refs:?}");
-        if let Ok(s) = &got {
-            assert!(oracle_schemes(n).contains(s), "{refs:?} -> {s:?}");
-        }
-        if want { valid += 1 } else { invalid += 1 }
+        assert!(
+            valid > 100 && invalid > 100,
+            "unbalanced: {valid} valid / {invalid} invalid (assonance {assonance})"
+        );
+    }
+}
+
+/// The kind of relation, classified from the raw dictionary: perfect if any pair of
+/// pronunciations rhymes perfectly, else assonant if any assonates, else identical if the words
+/// are the same or any pair is an identical rhyme, else none.
+fn oracle_kind(o: &Oracle, a: &str, b: &str) -> RhymeKind {
+    if a == b {
+        return RhymeKind::Identical;
+    }
+    let pairs = || {
+        o[a].iter()
+            .flat_map(|x| o[b].iter().map(move |y| (x, y)))
+            .filter_map(|(x, y)| Some((split(x)?, split(y)?)))
+    };
+    if pairs().any(|((tx, ox, _), (ty, oy, _))| tx == ty && ox != oy) {
+        RhymeKind::Perfect
+    } else if pairs().any(|((tx, ox, vx), (ty, oy, vy))| !(tx == ty && ox == oy) && vx == vy) {
+        RhymeKind::Assonant
+    } else if pairs().any(|((tx, ox, _), (ty, oy, _))| tx == ty && ox == oy) {
+        RhymeKind::Identical
+    } else {
+        RhymeKind::None
+    }
+}
+
+#[test]
+fn rhyme_kinds_agree_with_the_oracle() {
+    let f = fixture();
+    let lex = f.lex(true);
+    let mut r = Rng(env_or("SYNTAXEON_FUZZ_SEED", 0xC1A5) + 5);
+    let mut seen = [0_usize; 4];
+    for _ in 0..env_or("SYNTAXEON_FUZZ_ITERS", 20_000) {
+        let (a, b) = match r.below(3) {
+            0 => (
+                &f.words[r.below(f.words.len())],
+                &f.words[r.below(f.words.len())],
+            ),
+            k => {
+                let gs = if k == 1 { &f.groups } else { &f.vgroups };
+                let g = &gs[r.below(gs.len())];
+                (&g[r.below(g.len())], &g[r.below(g.len())])
+            }
+        };
+        let got = rhyme_kind(&lex, a, b).unwrap();
+        assert_eq!(got, oracle_kind(&f.oracle, a, b), "{a}/{b}");
+        seen[got as usize] += 1;
     }
     assert!(
-        valid > 100 && invalid > 100,
-        "unbalanced: {valid} valid / {invalid} invalid"
+        seen.iter().all(|n| *n > 20),
+        "every kind should occur: {seen:?}"
     );
 }

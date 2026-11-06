@@ -1,0 +1,23 @@
+[package]
+name = "syntaxeon-analysis"
+description = "Runs the Syntaxeon compiler phases and reports on them, for the CLI and the language server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+syntaxeon-check.workspace = true
+syntaxeon-core.workspace = true
+syntaxeon-lex.workspace = true
+syntaxeon-lexicon.workspace = true
+syntaxeon-syntax.workspace = true
+
+[lints]
+workspace = true

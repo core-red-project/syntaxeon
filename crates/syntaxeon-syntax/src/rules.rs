@@ -146,12 +146,25 @@ pub(crate) const PREFIX_ARITH: [(&[&str], BinOp); 5] = [
 ];
 
 /// `the text of X`: lead words and the builtin they call.
-pub(crate) const PREFIX_CALL: [(&[&str], &str); 4] = [
+pub(crate) const PREFIX_CALL: [(&[&str], &str); 6] = [
     (&["the", "text", "of"], "to_string"),
     (&["the", "whole", "number", "of"], "to_integer"),
     (&["the", "fraction", "of"], "to_float"),
     (&["the", "length", "of"], "length"),
+    // Characters and their codes (ADR-018).
+    (&["the", "code", "of"], "to_code"),
+    (&["the", "letter", "with", "code"], "to_letter"),
 ];
+
+/// Atoms that read no operand: a fixed phrase and the builtin it calls.
+pub(crate) const ZERO_ARG: [(&[&str], &str); 2] = [
+    (&["what", "is", "heard"], "hear"),
+    (&["there", "is", "more", "to", "hear"], "has_input"),
+];
+
+/// Tests written after an operand (`the line reads as a whole number`): phrase and builtin.
+pub(crate) const TESTS: [(&[&str], &str); 1] =
+    [(&["reads", "as", "a", "whole", "number"], "reads_as_integer")];
 
 pub(crate) const PREFIX_UNARY: [(&[&str], UnOp); 2] = [
     (&["the", "negation", "of"], UnOp::Neg),
@@ -236,28 +249,24 @@ pub(crate) const RESERVED: &[&str] = &[
     "thus",
     "what",
     "heard",
+    "hear",
     "appended",
     "with",
     "nothing",
 ];
 
-/// After `the`, a name starting with one of these would collide with a prefix form.
-pub(crate) const THE_HEADS: &[&str] = &[
-    "sum",
-    "difference",
-    "product",
-    "quotient",
-    "remainder",
-    "text",
-    "whole",
-    "fraction",
-    "length",
-    "negation",
-    "letter",
-];
-
 /// Builtins produced by conversions; their results are not `with … appended` bases.
-pub(crate) const CONVERSIONS: &[&str] = &["to_string", "to_integer", "to_float", "length", "hear"];
+pub(crate) const CONVERSIONS: &[&str] = &[
+    "to_string",
+    "to_integer",
+    "to_float",
+    "length",
+    "hear",
+    "to_code",
+    "to_letter",
+    "has_input",
+    "reads_as_integer",
+];
 
 pub(crate) const ONES: [&str; 20] = [
     "zero",
