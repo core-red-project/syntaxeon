@@ -41,6 +41,7 @@ dependencies = [
 name = "syntaxeon-lex"
 version = "0.0.1"
 dependencies = [
+ "syntaxeon-core",
  "syntaxeon-lexicon",
 ]
 

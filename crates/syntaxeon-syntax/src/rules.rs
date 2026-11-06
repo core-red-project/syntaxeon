@@ -59,6 +59,10 @@ pub(crate) enum Step {
 pub(crate) enum Make {
     Decl,
     Assign,
+    /// `Return E`.
+    Return,
+    /// `Return nothing`.
+    Nothing,
 }
 
 /// A sentence shape: the steps must cover the whole sentence. Word order is free to differ
@@ -101,13 +105,27 @@ pub(crate) const FORMS: &[Form] = &[
         steps: &[Expr, Words(&["shall"]), Target, Words(&["now", "be"])],
         make: Make::Assign,
     },
+    // R1–R2: Give back E / Return E; R3–R4: the same with `nothing` (`PROSE_GRAMMAR.md` §6.5).
+    Form {
+        steps: &[Words(&["give", "back"]), Expr],
+        make: Make::Return,
+    },
+    Form {
+        steps: &[Words(&["return"]), Expr],
+        make: Make::Return,
+    },
+    Form {
+        steps: &[Words(&["give", "back", "nothing"])],
+        make: Make::Nothing,
+    },
+    Form {
+        steps: &[Words(&["return", "nothing"])],
+        make: Make::Nothing,
+    },
 ];
 
 /// Output verbs and the builtin each lowers to.
 pub(crate) const SPEAK: &[(&str, &str)] = &[("speak", "speak"), ("proclaim", "speakln")];
-
-/// Words that open a `Return`.
-pub(crate) const RETURN_LEADS: &[&[&str]] = &[&["give", "back"], &["return"]];
 
 /// Type phrases (`spec/PROSE_GRAMMAR.md` §4); `list of T` is built by the reader.
 pub(crate) const SIMPLE_TYPES: [(&[&str], Type); 5] = [

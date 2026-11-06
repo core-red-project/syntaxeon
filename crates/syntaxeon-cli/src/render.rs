@@ -10,7 +10,19 @@ use syntaxeon_lexicon::scheme::{StanzaError, find_scheme};
 use crate::pipeline::{Analysis, category, headline};
 use crate::style::Style;
 
-pub fn human(d: &Diagnostic, file: &str, s: Style) -> String {
+/// 1-based (line, column) of byte offset `at` in `src`, with the text of that line.
+fn locate(src: &str, at: usize) -> Option<(usize, usize, &str)> {
+    let before = src.get(..at)?;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line_end = src[line_start..]
+        .find('\n')
+        .map_or(src.len(), |i| line_start + i);
+    let line = before.matches('\n').count() + 1;
+    let col = before[line_start..].chars().count() + 1;
+    Some((line, col, src[line_start..line_end].trim_end_matches('\r')))
+}
+
+pub fn human(d: &Diagnostic, file: &str, src: &str, s: Style) -> String {
     let head = headline(d.code).unwrap_or(&d.message);
     let mut out = format!(
         "{}{} {}\n",
@@ -18,7 +30,28 @@ pub fn human(d: &Diagnostic, file: &str, s: Style) -> String {
         s.dim(&format!(" ({})", category(d.code))),
         head
     );
-    if d.line > 0 {
+    let spot = d
+        .span
+        .and_then(|sp| locate(src, sp.start).map(|(l, c, text)| (sp, l, c, text)));
+    if let Some((sp, line, col, text)) = spot {
+        // Underline the part of the span that lies on its first line.
+        let width = src[sp.start..sp.end.min(src.len())]
+            .chars()
+            .take_while(|c| *c != '\n')
+            .count()
+            .max(1);
+        let gutter = " ".repeat(line.to_string().len());
+        let _ = writeln!(out, "  {} {file}:{line}:{col}", s.blue("-->"));
+        let _ = writeln!(out, "{gutter} {}", s.blue("|"));
+        let _ = writeln!(out, "{line} {} {text}", s.blue("|"));
+        let _ = writeln!(
+            out,
+            "{gutter} {} {}{}",
+            s.blue("|"),
+            " ".repeat(col - 1),
+            s.red(&"^".repeat(width))
+        );
+    } else if d.line > 0 {
         let _ = writeln!(out, "  {} {file}:{}", s.blue("-->"), d.line);
     }
     if headline(d.code).is_some() {
@@ -45,17 +78,25 @@ fn json_str(s: &str) -> String {
     out
 }
 
-/// `{"file", "ok", "phase", "diagnostics":[{"code","category","severity","line","message"}]}`
-pub fn json(file: &str, a: &Analysis) -> String {
+/// `{"file", "ok", "phase", "diagnostics":[{"code","category","severity","line","column","span","message"}]}`;
+/// `column` and `span` (`{"start","end"}` byte offsets) are `null` unless the error is about one expression.
+pub fn json(file: &str, src: &str, a: &Analysis) -> String {
     let items: Vec<String> = a
         .diagnostics
         .iter()
         .map(|d| {
             format!(
-                "{{\"code\":{},\"category\":{},\"severity\":\"error\",\"line\":{},\"message\":{}}}",
+                "{{\"code\":{},\"category\":{},\"severity\":\"error\",\"line\":{},\"column\":{},\"span\":{},\"message\":{}}}",
                 json_str(d.code),
                 json_str(category(d.code)),
                 d.line,
+                d.span
+                    .and_then(|sp| locate(src, sp.start))
+                    .map_or("null".to_string(), |(_, c, _)| c.to_string()),
+                d.span.map_or("null".to_string(), |sp| format!(
+                    "{{\"start\":{},\"end\":{}}}",
+                    sp.start, sp.end
+                )),
                 json_str(&d.message)
             )
         })

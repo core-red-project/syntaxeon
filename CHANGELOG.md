@@ -14,8 +14,10 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Language charter, 13 architecture decision records and drafts of the semantic core, prose grammar and prosody specifications
 - Pinned pronunciation lexicon (CMU Pronouncing Dictionary) with sha256 verification, the rhyme function and the permitted stanza schemes
 - Lexer, literary layer (verses, stanzas, end words) and pronunciation pragmas
-- Prose parser that returns every reading of a sentence and rejects ambiguity, with its closed verb sets, connectives and operator maps kept as data tables, including the declaration and assignment sentence shapes (`rules.rs`)
+- Prose parser that returns every reading of a sentence and rejects ambiguity, memoized so deeply nested expressions parse in linear time, with its closed verb sets, connectives and operator maps kept as data tables, including the declaration and assignment sentence shapes (`rules.rs`)
 - Name resolution and static type checking
+- Differential fuzzing of strings, floats and their conversions against a second reference model
+- `syntaxeon fmt` (`--write`, `--check`): canonical whitespace and canonical spelling of declarations, assignments and `Give back` / `Return`, also for sentences split over lines, applied only when the program still has the same meaning and still rhymes (ADR-014)
 - Tree-walking evaluator with checked integers and a 10 000-frame call limit
 - Whole-program differential fuzzing against an independent reference interpreter, mutation fuzzing of block structure and crash safety, grammar-driven, free-form and token-soup fuzzing of the prose parser, property fuzzing of rhyme and stanza schemes against an independent oracle over the raw dictionary, plus an `SXP-104` message that shows the competing readings
 - `syntaxeon` command with `check`, `explain`, `ast`, `run`, `rhymes` (common words only, from a vendored ESDB list pinned by sha256), shell completions and a man page
@@ -23,8 +25,9 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Every expression carries the byte span of its words; type errors and runtime errors underline the offending expression (`file:line:col` and a caret line), and `check --json` reports `column` and `span`
 - Pinned toolchain moved from Rust 1.93.0 to 1.99.1; the CI and release workflows now read it from `rust-toolchain.toml`, so a toolchain bump is a one-file change
-- CI actions updated: install-action 2.89.1, rust-toolchain, rust-cache 2.9.3, upload-artifact 7.0.2, download-artifact 8.0.2
+- CI actions updated: install-action 2.90.1, action-gh-release 3.0.4, just 1.59.0, cargo-deny 0.20.2, rust-toolchain, rust-cache 2.9.3, upload-artifact 7.0.2, download-artifact 8.0.2
 
 ### Fixed
 

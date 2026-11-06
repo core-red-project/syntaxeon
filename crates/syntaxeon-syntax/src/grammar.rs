@@ -2,10 +2,12 @@
 
 use crate::rules::{
     COMPARE, CONVERSIONS, DETS, FORMS, HEADERS, HeaderKind, INFIX, JOIN, Make, PREFIX_ARITH,
-    PREFIX_CALL, PREFIX_UNARY, RESERVED, RETURN_LEADS, SIMPLE_TYPES, SPEAK, Step, THE_HEADS,
-    number_word,
+    PREFIX_CALL, PREFIX_UNARY, RESERVED, SIMPLE_TYPES, SPEAK, Step, THE_HEADS, number_word,
 };
-use syntaxeon_core::{BinOp, Expr, Name, Param, StmtKind, Target, Type, UnOp};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use syntaxeon_core::{BinOp, Expr, ExprKind, Name, Param, Span, StmtKind, Target, Type, UnOp};
 use syntaxeon_lex::lexer::Tok;
 
 /// Parts collected while matching a [`Form`](crate::rules::Form).
@@ -16,6 +18,8 @@ struct Slots {
     ty: Option<Type>,
     mutable: bool,
     expr: Option<Expr>,
+    /// Token range `(start, end)` each step consumed, in step order.
+    spans: Vec<(usize, usize)>,
 }
 
 /// All ways to parse a prefix: each result is a value and the index just past it.
@@ -42,14 +46,14 @@ enum NameKind {
 /// infix/comparison word after such an expression belongs to the construct, never to what
 /// contains it, so every sentence keeps one reading.
 fn open_tail(e: &Expr) -> bool {
-    match e {
-        Expr::List(_) => true,
-        Expr::Call(n, args) if CONVERSIONS.contains(&n.as_str()) => {
+    match &e.kind {
+        ExprKind::List(_) => true,
+        ExprKind::Call(n, args) if CONVERSIONS.contains(&n.as_str()) => {
             args.last().is_some_and(open_tail)
         }
-        Expr::Call(n, args) => n != "append" && !args.is_empty(),
-        Expr::Unary(_, a) | Expr::Index(a, _) => open_tail(a),
-        Expr::Binary(_, _, b) => open_tail(b),
+        ExprKind::Call(n, args) => n != "append" && !args.is_empty(),
+        ExprKind::Unary(_, a) | ExprKind::Index(a, _) => open_tail(a),
+        ExprKind::Binary(_, _, b) => open_tail(b),
         _ => false,
     }
 }
@@ -66,8 +70,44 @@ pub(crate) enum Open {
     Repeat(Expr),
 }
 
+/// Memo tables for the three recursive expression levels, keyed by start token. Without them
+/// every level re-parses its operands several times and nested calls take exponential time.
+#[derive(Default)]
+struct Memo {
+    operand: HashMap<usize, R<Expr>>,
+    arith: HashMap<usize, R<Expr>>,
+    expr: HashMap<usize, R<Expr>>,
+}
+
 pub(crate) struct P<'a> {
-    pub t: &'a [Tok],
+    t: &'a [Tok],
+    /// Source span of each token in `t`.
+    sp: &'a [Span],
+    memo: RefCell<Memo>,
+}
+
+impl<'a> P<'a> {
+    pub(crate) fn new(t: &'a [Tok], sp: &'a [Span]) -> Self {
+        P {
+            t,
+            sp,
+            memo: RefCell::new(Memo::default()),
+        }
+    }
+
+    /// The source text covered by tokens `i..j` (empty when there are none).
+    fn span(&self, i: usize, j: usize) -> Span {
+        match (
+            self.sp.get(i),
+            j.checked_sub(1).and_then(|k| self.sp.get(k)),
+        ) {
+            (Some(a), Some(b)) if j > i => Span {
+                start: a.start,
+                end: b.end,
+            },
+            _ => Span::default(),
+        }
+    }
 }
 
 impl P<'_> {
@@ -290,12 +330,24 @@ impl P<'_> {
 
     /// Atom, prefix form, or `base with E appended` (`spec/PROSE_GRAMMAR.md` §7.2).
     fn operand(&self, i: usize) -> R<Expr> {
+        if let Some(hit) = self.memo.borrow().operand.get(&i) {
+            return hit.clone();
+        }
+        let mut out = self.operand_uncached(i);
+        for (e, j) in &mut out {
+            e.span = self.span(i, *j);
+        }
+        self.memo.borrow_mut().operand.insert(i, out.clone());
+        out
+    }
+
+    fn operand_uncached(&self, i: usize) -> R<Expr> {
         let mut base = self.atom(i);
         base.extend(self.prefix(i));
         let mut out = base.clone();
-        let appendable = |e: &Expr| match e {
-            Expr::Var(_) => true,
-            Expr::Call(n, _) => !CONVERSIONS.contains(&n.as_str()),
+        let appendable = |e: &Expr| match &e.kind {
+            ExprKind::Var(_) => true,
+            ExprKind::Call(n, _) => !CONVERSIONS.contains(&n.as_str()),
             _ => false,
         };
         let mut cur: R<Expr> = base
@@ -310,7 +362,8 @@ impl P<'_> {
                 }
                 let mut elems = self.atom(j + 1);
                 elems.extend(self.prefix(j + 1));
-                for (x, k) in elems {
+                for (mut x, k) in elems {
+                    x.span = self.span(j + 1, k);
                     if self.word(k, "appended") {
                         let call = Expr::Call("append".into(), vec![list.clone(), x]);
                         next.push((call, k + 1));
@@ -325,6 +378,18 @@ impl P<'_> {
 
     /// An operand, or `operand infix-word operand` (no chaining).
     fn arith(&self, i: usize) -> R<Expr> {
+        if let Some(hit) = self.memo.borrow().arith.get(&i) {
+            return hit.clone();
+        }
+        let mut out = self.arith_uncached(i);
+        for (e, j) in &mut out {
+            e.span = self.span(i, *j);
+        }
+        self.memo.borrow_mut().arith.insert(i, out.clone());
+        out
+    }
+
+    fn arith_uncached(&self, i: usize) -> R<Expr> {
         let mut out = self.operand(i);
         for (a, j) in self.operand(i).into_iter().filter(|(a, _)| !open_tail(a)) {
             for (w, op) in INFIX {
@@ -342,13 +407,25 @@ impl P<'_> {
     /// `both`/`either` live here, not at operand level, so their result is never the left
     /// side of a comparison (`both a and b is c` has exactly one reading).
     pub(crate) fn expr(&self, i: usize) -> R<Expr> {
+        if let Some(hit) = self.memo.borrow().expr.get(&i) {
+            return hit.clone();
+        }
+        let mut out = self.expr_uncached(i);
+        for (e, j) in &mut out {
+            e.span = self.span(i, *j);
+        }
+        self.memo.borrow_mut().expr.insert(i, out.clone());
+        out
+    }
+
+    fn expr_uncached(&self, i: usize) -> R<Expr> {
         let mut out = self.arith(i);
         for (a, j) in self.operand(i).into_iter().filter(|(a, _)| !open_tail(a)) {
             for (ws, op) in COMPARE {
                 if let Some(k) = self.seq(j, ws) {
                     for (b, l) in self.operand(k) {
                         // `a is not b` is Ne only; never Eq(a, Not(b)).
-                        if op == BinOp::Eq && matches!(b, Expr::Unary(UnOp::Not, _)) {
+                        if op == BinOp::Eq && matches!(b.kind, ExprKind::Unary(UnOp::Not, _)) {
                             continue;
                         }
                         out.push((bin(op, a.clone(), b), l));
@@ -431,6 +508,8 @@ impl P<'_> {
                     target: s.target?,
                     value: s.expr?,
                 }),
+                Make::Return => Some(StmtKind::Return(Some(s.expr?))),
+                Make::Nothing => Some(StmtKind::Return(None)),
             }));
         }
         out
@@ -444,62 +523,77 @@ impl P<'_> {
             }
             return;
         };
+        let mut go = |j: usize, mut s: Slots| {
+            s.spans.push((i, j));
+            self.run_steps(rest, j, s, out);
+        };
         match step {
             Step::Words(ws) => {
                 if let Some(j) = self.seq(i, ws) {
-                    self.run_steps(rest, j, slots, out);
+                    go(j, slots);
                 }
             }
             Step::Name => {
                 for (name, j) in self.name(i, NameKind::Binding, true) {
-                    let s = Slots {
-                        name: Some(name),
-                        ..slots.clone()
-                    };
-                    self.run_steps(rest, j, s, out);
+                    go(
+                        j,
+                        Slots {
+                            name: Some(name),
+                            ..slots.clone()
+                        },
+                    );
                 }
             }
             Step::Target => {
                 for (target, j) in self.target(i) {
-                    let s = Slots {
-                        target: Some(target),
-                        ..slots.clone()
-                    };
-                    self.run_steps(rest, j, s, out);
+                    go(
+                        j,
+                        Slots {
+                            target: Some(target),
+                            ..slots.clone()
+                        },
+                    );
                 }
             }
             Step::Annot => {
                 for (ty, j) in self.annot(i) {
-                    self.run_steps(
-                        rest,
+                    go(
                         j,
                         Slots {
                             ty,
                             ..slots.clone()
                         },
-                        out,
                     );
                 }
             }
             Step::Verb => {
                 if let Some((mutable, j)) = self.verb(i) {
-                    self.run_steps(rest, j, Slots { mutable, ..slots }, out);
+                    go(j, Slots { mutable, ..slots });
                 }
             }
             Step::Expr => {
                 for (e, j) in self.expr(i) {
-                    self.run_steps(
-                        rest,
+                    go(
                         j,
                         Slots {
                             expr: Some(e),
                             ..slots.clone()
                         },
-                        out,
                     );
                 }
             }
         }
+    }
+
+    /// Every form that reads the whole sentence, as `(form index, token ranges per step)`.
+    pub(crate) fn form_matches(&self) -> Vec<(usize, Vec<(usize, usize)>)> {
+        let mut out = Vec::new();
+        for (k, form) in FORMS.iter().enumerate() {
+            let mut done = Vec::new();
+            self.run_steps(form.steps, 0, Slots::default(), &mut done);
+            out.extend(done.into_iter().map(|s| (k, s.spans)));
+        }
+        out
     }
 
     /// Output, call and return statements (`spec/PROSE_GRAMMAR.md` §6.3–§6.5).
@@ -525,18 +619,6 @@ impl P<'_> {
                         if k == n {
                             out.push(StmtKind::Expr(Expr::Call(name.clone(), args)));
                         }
-                    }
-                }
-            }
-        }
-        for lead in RETURN_LEADS {
-            if let Some(j) = self.seq(0, lead) {
-                if self.seq(j, &["nothing"]) == Some(n) {
-                    out.push(StmtKind::Return(None));
-                }
-                for (e, k) in self.expr(j) {
-                    if k == n {
-                        out.push(StmtKind::Return(Some(e)));
                     }
                 }
             }

@@ -4,10 +4,11 @@
 //! Phases run in ADR-009 order and stop at the first failing one, so a program that is both
 //! wrong and unmetrical reports its meaning error first.
 //!
-//! shortcut: `build`, `fmt`, `repl` and `rhyme` are not implemented (`explain` covers rhyme
+//! shortcut: `build`, `repl` and `rhyme` are not implemented (`explain` covers rhyme
 //! analysis); `--json` is only supported by `check`.
 
 mod args;
+mod fmt;
 mod help;
 mod pipeline;
 mod render;
@@ -73,6 +74,7 @@ pub fn run(
             0
         }
         Cmd::Rhymes(word) => rhymes::run(&word, opts, out, err),
+        Cmd::Fmt(ref f) => fmt_command(f, opts, (so, se), stdin, out, err),
         Cmd::Completions(shell) => {
             if let Some(script) = help::completions(&shell) {
                 let _ = write!(out, "{script}");
@@ -105,6 +107,77 @@ pub fn run(
     }
 }
 
+fn fmt_command(
+    file: &str,
+    opts: Opts,
+    (_, se): (Style, Style),
+    stdin: &mut dyn Read,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    if opts.write && file == "-" {
+        let _ = writeln!(
+            err,
+            "error: --write needs a file, not standard input\n  try 'syntaxeon --help'"
+        );
+        return 2;
+    }
+    let src = match read_source(file, stdin) {
+        Ok(s) => s,
+        Err(msg) => {
+            let _ = writeln!(
+                err,
+                "error: {msg}\n  check the path, or use '-' for standard input"
+            );
+            return 1;
+        }
+    };
+    let formatted = match fmt::format(&src) {
+        Ok(f) => f,
+        Err(diagnostics) => {
+            for d in &diagnostics {
+                let _ = write!(err, "{}", render::human(d, file, &src, se));
+            }
+            let _ = writeln!(
+                err,
+                "{}: {file}: only a valid program can be formatted\n  fix the first error and run it again",
+                se.red("error")
+            );
+            return 1;
+        }
+    };
+    let same = formatted == src;
+    if opts.check {
+        if !same {
+            let _ = writeln!(
+                err,
+                "{}: {file}: not formatted\n  run 'syntaxeon fmt --write {file}'",
+                se.red("error")
+            );
+        }
+        return i32::from(!same);
+    }
+    if opts.write {
+        if !same && let Err(e) = std::fs::write(file, &formatted) {
+            let _ = writeln!(
+                err,
+                "error: cannot write '{file}': {e}\n  check the file's permissions"
+            );
+            return 1;
+        }
+        if !opts.quiet {
+            let _ = writeln!(
+                out,
+                "{}: {file}",
+                if same { "unchanged" } else { "formatted" }
+            );
+        }
+        return 0;
+    }
+    let _ = write!(out, "{formatted}");
+    0
+}
+
 fn file_command(
     cmd: &Cmd,
     file: &str,
@@ -132,12 +205,12 @@ fn file_command(
     };
     let a = analyze(&src, &mut note);
     if opts.json {
-        let _ = write!(out, "{}", render::json(file, &a));
+        let _ = write!(out, "{}", render::json(file, &src, &a));
         return i32::from(!a.diagnostics.is_empty());
     }
     if !a.diagnostics.is_empty() {
         for d in &a.diagnostics {
-            let _ = write!(err, "{}", render::human(d, file, se));
+            let _ = write!(err, "{}", render::human(d, file, &src, se));
         }
         let phase = a.failed_phase.unwrap_or("analysis");
         let n = a.diagnostics.len();
@@ -165,9 +238,11 @@ fn file_command(
                         &Diagnostic {
                             code: e.code,
                             message: e.message,
-                            line: e.line
+                            line: e.line,
+                            span: e.span,
                         },
                         file,
+                        &src,
                         se
                     )
                 );

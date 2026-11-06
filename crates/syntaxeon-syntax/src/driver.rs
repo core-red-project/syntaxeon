@@ -1,14 +1,16 @@
 //! Stanza and block driver (`spec/PROSE_GRAMMAR.md` §3, §6.6, §8, §10).
 
-use syntaxeon_core::{Expr, Program, Stanza, Stmt, StmtKind, Type};
+use syntaxeon_core::{Expr, ExprKind, Program, Span, Stanza, Stmt, StmtKind, Type};
 use syntaxeon_lex::Diagnostic;
 use syntaxeon_lex::lexer::{Lexed, Tok, lex};
 use syntaxeon_lex::literary::Stanza as Verses;
 
 use crate::grammar::{Open, P};
+use crate::rules::{FORMS, Step};
 
 struct Sentence {
     toks: Vec<Tok>,
+    spans: Vec<Span>,
     term: char,
     line: usize,
 }
@@ -18,6 +20,7 @@ fn diag(code: &'static str, message: &str, line: usize) -> Diagnostic {
         code,
         message: message.to_string(),
         line,
+        span: None,
     }
 }
 
@@ -37,6 +40,7 @@ fn split_sentences(lexed: &Lexed, st: &Verses, diags: &mut Vec<Diagnostic>) -> V
     };
     let mut out = Vec::new();
     let mut cur: Vec<Tok> = Vec::new();
+    let mut cur_spans: Vec<Span> = Vec::new();
     let mut line = 0;
     for t in &lexed.tokens[first.tokens.start..last.tokens.end] {
         if cur.is_empty() {
@@ -46,11 +50,15 @@ fn split_sentences(lexed: &Lexed, st: &Verses, diags: &mut Vec<Diagnostic>) -> V
             Tok::Punct(c @ ('.' | '!' | '?' | ':')) => {
                 out.push(Sentence {
                     toks: std::mem::take(&mut cur),
+                    spans: std::mem::take(&mut cur_spans),
                     term: c,
                     line,
                 });
             }
-            ref other => cur.push(other.clone()),
+            ref other => {
+                cur.push(other.clone());
+                cur_spans.push(t.span);
+            }
         }
     }
     if !cur.is_empty() {
@@ -83,7 +91,7 @@ fn parse_stanza(idx: usize, sentences: &[Sentence], diags: &mut Vec<Diagnostic>)
         ));
         return None;
     }
-    let p = P { t: &first.toks };
+    let p = P::new(&first.toks, &first.spans);
     let entry = dedup(p.entry_header());
     let funcs = dedup(p.function_header());
     let (title, params, ret) = match (idx, entry.len(), funcs.len()) {
@@ -184,7 +192,7 @@ fn parse_body(sentences: &[Sentence], diags: &mut Vec<Diagnostic>) -> Vec<Stmt> 
                 )),
             }
         } else if s.term == ':' {
-            let mut opens = P { t: &s.toks }.block_header();
+            let mut opens = P::new(&s.toks, &s.spans).block_header();
             opens.dedup_by(|a, b| open_eq(a, b));
             match opens.len() {
                 0 => diags.push(diag(
@@ -244,11 +252,11 @@ fn open_has_bad_empty(o: &Open) -> bool {
 }
 
 fn has_empty(e: &Expr) -> bool {
-    match e {
-        Expr::EmptyList(_) => true,
-        Expr::Unary(_, a) => has_empty(a),
-        Expr::Binary(_, a, b) | Expr::Index(a, b) => has_empty(a) || has_empty(b),
-        Expr::Call(_, xs) | Expr::List(xs) => xs.iter().any(has_empty),
+    match &e.kind {
+        ExprKind::EmptyList(_) => true,
+        ExprKind::Unary(_, a) => has_empty(a),
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => has_empty(a) || has_empty(b),
+        ExprKind::Call(_, xs) | ExprKind::List(xs) => xs.iter().any(has_empty),
         _ => false,
     }
 }
@@ -265,10 +273,13 @@ fn kind_has_bad_empty(k: &StmtKind) -> bool {
 /// Resolves `an empty list of T` in an annotated declaration; returns false if misplaced.
 fn resolve_empty(kind: &mut StmtKind) -> bool {
     if let StmtKind::Decl { ty, init, .. } = kind
-        && let Expr::EmptyList(t) = init
+        && let ExprKind::EmptyList(t) = &init.kind
     {
         if *ty == Some(Type::List(Box::new(t.clone()))) {
-            *init = Expr::List(vec![]);
+            *init = Expr {
+                kind: ExprKind::List(vec![]),
+                span: init.span,
+            };
         } else {
             return false;
         }
@@ -277,7 +288,7 @@ fn resolve_empty(kind: &mut StmtKind) -> bool {
 }
 
 fn simple_statement(s: &Sentence, diags: &mut Vec<Diagnostic>) -> Option<StmtKind> {
-    let mut parses = dedup(P { t: &s.toks }.statement());
+    let mut parses = dedup(P::new(&s.toks, &s.spans).statement());
     match parses.len() {
         0 => {
             let words: Vec<&str> = s
@@ -337,7 +348,10 @@ pub fn statement_readings(sentence: &str) -> Vec<StmtKind> {
     let lexed = lex(sentence);
     let toks: Vec<Tok> = lexed.tokens.iter().map(|t| t.tok.clone()).collect();
     match toks.split_last() {
-        Some((Tok::Punct('.' | '!' | '?'), body)) => dedup(P { t: body }.statement()),
+        Some((Tok::Punct('.' | '!' | '?'), body)) => {
+            let spans: Vec<Span> = lexed.tokens.iter().map(|t| t.span).collect();
+            dedup(P::new(body, &spans).statement())
+        }
         _ => vec![],
     }
 }
@@ -362,6 +376,87 @@ fn ambiguity_message(n: usize, readings: &[StmtKind]) -> String {
         "ambiguous sentence: {n} distinct readings: {}; bind a value with 'Let' first, or nest with a prefix form",
         shown.join(" ")
     )
+}
+
+/// Other spellings of a declaration or assignment sentence (terminator removed): the same
+/// words re-ordered into every form listed *before* the one it uses in `rules::FORMS`, most
+/// preferred first. A candidate is only a proposal; the caller must check that it still reads
+/// as the same statement (and, for `fmt`, still rhymes).
+#[must_use]
+pub fn preferred_spellings(sentence: &str) -> Vec<String> {
+    let lexed = lex(sentence);
+    if !lexed.diagnostics.is_empty() {
+        return vec![];
+    }
+    let toks: Vec<Tok> = lexed.tokens.iter().map(|t| t.tok.clone()).collect();
+    let spans: Vec<Span> = lexed.tokens.iter().map(|t| t.span).collect();
+    let matches = P::new(&toks, &spans).form_matches();
+    let Some(current) = matches.iter().map(|(k, _)| *k).min() else {
+        return vec![];
+    };
+    let make = FORMS[current].make;
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for (_, spans) in matches.iter().filter(|(k, _)| *k == current) {
+        let text = |k: usize| -> String {
+            let (a, b) = spans[k];
+            if a == b {
+                return String::new();
+            }
+            let (from, to) = (lexed.tokens[a].span.start, lexed.tokens[b - 1].span.end);
+            let mut t = sentence[from..to].to_string();
+            if a == 0 && matches!(lexed.tokens[0].tok, Tok::Word(_)) {
+                lower_first(&mut t);
+            }
+            t
+        };
+        // Slots by role, from the form that matched.
+        let slot = |step: Step| -> String {
+            FORMS[current]
+                .steps
+                .iter()
+                .position(|s| std::mem::discriminant(s) == std::mem::discriminant(&step))
+                .map(text)
+                .unwrap_or_default()
+        };
+        for (k, form) in FORMS.iter().enumerate().take(current) {
+            if std::mem::discriminant(&form.make) != std::mem::discriminant(&make) {
+                continue;
+            }
+            let mut s = String::new();
+            for step in form.steps {
+                let piece = match step {
+                    Step::Words(ws) => ws.join(" "),
+                    other => slot(*other),
+                };
+                if piece.is_empty() {
+                    continue;
+                }
+                // An apposition hugs the name before it.
+                if !s.is_empty() && !matches!(step, Step::Annot) {
+                    s.push(' ');
+                }
+                s.push_str(&piece);
+            }
+            upper_first(&mut s);
+            if s != sentence && !out.iter().any(|(_, o)| *o == s) {
+                out.push((k, s));
+            }
+        }
+    }
+    out.sort_by_key(|(k, _)| *k);
+    out.into_iter().map(|(_, s)| s).collect()
+}
+
+fn lower_first(s: &mut String) {
+    if let Some(c) = s.chars().next().filter(|c| c.is_uppercase()) {
+        s.replace_range(..c.len_utf8(), &c.to_lowercase().to_string());
+    }
+}
+
+fn upper_first(s: &mut String) {
+    if let Some(c) = s.chars().next().filter(|c| c.is_lowercase()) {
+        s.replace_range(..c.len_utf8(), &c.to_uppercase().to_string());
+    }
 }
 
 #[cfg(test)]

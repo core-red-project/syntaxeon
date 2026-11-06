@@ -1,7 +1,8 @@
 //! Canonical AST and types. Normative reference: `spec/SEMANTIC_CORE.md` §3–§4.
 //!
-//! shortcut: only statements and stanzas carry a source line; expressions carry no span yet.
-//! Add spans before the type checker needs expression-level diagnostics.
+//! Statements and stanzas carry a source line; every expression carries the byte span of the
+//! words it was read from. Spans never take part in equality, so two readings of one text, or
+//! a program before and after `fmt`, compare equal when their structure does.
 
 /// Normalized identifier (`spec/SEMANTIC_CORE.md` §2).
 pub type Name = String;
@@ -79,8 +80,105 @@ pub enum Target {
     Index(Name, Expr),
 }
 
+/// Byte range into the source text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    /// Whether the span covers text; spans of expressions built without a source are empty.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.end <= self.start
+    }
+}
+
+/// An expression: its shape and where it was written. Equality and `Debug` look at the shape
+/// only (see the crate docs).
+#[derive(Clone)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl std::fmt::Debug for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl From<ExprKind> for Expr {
+    fn from(kind: ExprKind) -> Self {
+        Expr {
+            kind,
+            span: Span::default(),
+        }
+    }
+}
+
+// Constructors named like the variants, so building `Expr::Int(1)` reads as before spans existed.
+#[allow(non_snake_case)] // mirrors the `ExprKind` variant names on purpose
+impl Expr {
+    #[must_use]
+    pub fn Int(n: i64) -> Expr {
+        ExprKind::Int(n).into()
+    }
+    #[must_use]
+    pub fn Float(x: f64) -> Expr {
+        ExprKind::Float(x).into()
+    }
+    #[must_use]
+    pub fn Bool(b: bool) -> Expr {
+        ExprKind::Bool(b).into()
+    }
+    #[must_use]
+    pub fn Str(s: String) -> Expr {
+        ExprKind::Str(s).into()
+    }
+    #[must_use]
+    pub fn Char(c: char) -> Expr {
+        ExprKind::Char(c).into()
+    }
+    #[must_use]
+    pub fn Var(n: Name) -> Expr {
+        ExprKind::Var(n).into()
+    }
+    #[must_use]
+    pub fn Unary(op: UnOp, a: Box<Expr>) -> Expr {
+        ExprKind::Unary(op, a).into()
+    }
+    #[must_use]
+    pub fn Binary(op: BinOp, a: Box<Expr>, b: Box<Expr>) -> Expr {
+        ExprKind::Binary(op, a, b).into()
+    }
+    #[must_use]
+    pub fn Call(n: Name, args: Vec<Expr>) -> Expr {
+        ExprKind::Call(n, args).into()
+    }
+    #[must_use]
+    pub fn List(xs: Vec<Expr>) -> Expr {
+        ExprKind::List(xs).into()
+    }
+    #[must_use]
+    pub fn Index(l: Box<Expr>, i: Box<Expr>) -> Expr {
+        ExprKind::Index(l, i).into()
+    }
+    #[must_use]
+    pub fn EmptyList(t: Type) -> Expr {
+        ExprKind::EmptyList(t).into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
-pub enum Expr {
+pub enum ExprKind {
     Int(i64),
     Float(f64),
     Bool(bool),

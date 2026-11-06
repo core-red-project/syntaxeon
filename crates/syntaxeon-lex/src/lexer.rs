@@ -85,6 +85,7 @@ impl Lexer<'_> {
             code,
             message: message.to_string(),
             line: self.line,
+            span: None,
         });
     }
 
@@ -233,6 +234,7 @@ impl Lexer<'_> {
                     code: "SXP-101",
                     message: "unterminated aside".to_string(),
                     line: start_line,
+                    span: None,
                 });
                 return;
             };
@@ -265,6 +267,7 @@ impl Lexer<'_> {
                 code: "SXP-302",
                 message: "malformed pronunciation pragma".to_string(),
                 line: start_line,
+                span: None,
             }),
         }
     }

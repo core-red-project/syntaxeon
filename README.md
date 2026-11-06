@@ -89,6 +89,7 @@ The four end words (`men`, `again`, `ten`, `amen`) form the stanza's `AABB` sche
 | Command | Does |
 |---|---|
 | `check <file>` | Check syntax, types and rhyme; exit 1 if the program is invalid |
+| `fmt <file>` | Print the program in canonical form, keeping its meaning and its rhymes (`--write` rewrites the file, `--check` exits 1 if it would change) |
 | `explain <file>` | Show how each stanza reads and rhymes |
 | `ast <file>` | Dump the canonical AST |
 | `run <file>` | Check, then run the program (`hear` reads standard input) |
@@ -108,7 +109,7 @@ Data goes to stdout; diagnostics, notes and errors go to stderr. Color is off wh
 | `1` | Invalid program, runtime failure or I/O failure |
 | `2` | Usage error |
 
-`check --json` prints one object on stdout: `file`, `ok`, `phase` (`syntax`, `semantics`, `prosody` or `null`), and `diagnostics`, each with `code`, `category`, `severity`, `line` and `message`. Diagnostic codes are documented in [spec/](spec/): `SXP-1xx` syntax, `SXP-2xx` prosody, `SXP-3xx` lexicon, `SXP-4xx` static semantics, `SXP-5xx` runtime.
+`check --json` prints one object on stdout: `file`, `ok`, `phase` (`syntax`, `semantics`, `prosody` or `null`), and `diagnostics`, each with `code`, `category`, `severity`, `line`, `column`, `span` and `message`. `column` and `span` (`{"start", "end"}`, byte offsets) are `null` unless the error is about one expression; human output then underlines it. Diagnostic codes are documented in [spec/](spec/): `SXP-1xx` syntax, `SXP-2xx` prosody, `SXP-3xx` lexicon, `SXP-4xx` static semantics, `SXP-5xx` runtime.
 
 ### Configuration
 

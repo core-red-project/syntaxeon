@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::sha256::sha256_hex;
 
@@ -82,15 +82,18 @@ impl PragmaError {
 
 #[derive(Clone, Debug, Default)]
 pub struct Lexicon {
-    entries: HashMap<String, Vec<Pron>>,
+    /// The dictionary, shared between clones (a clone per analyzed file must stay cheap).
+    entries: Arc<HashMap<String, Vec<Pron>>>,
+    /// Words added by pragmas; never overlaps `entries`.
+    extra: HashMap<String, Vec<Pron>>,
     /// Common English words, for `rhymes` suggestions; empty unless loaded.
-    common: HashSet<String>,
+    common: Arc<HashSet<String>>,
 }
 
 impl Lexicon {
     /// Parses `CMUdict` text: `WORD  PH PH ...`, `WORD(2)` alternates, `;;;` comments.
     pub fn parse(text: &str) -> Result<Lexicon, LexiconError> {
-        let mut lex = Lexicon::default();
+        let mut entries: HashMap<String, Vec<Pron>> = HashMap::new();
         for (i, raw) in text.lines().enumerate() {
             // Some CMUdict entries carry a trailing `# note`.
             let line = raw.split_once('#').map_or(raw, |(code, _)| code).trim();
@@ -103,9 +106,12 @@ impl Lexicon {
             let word = word.split('(').next().unwrap_or(word).to_lowercase();
             let pron: Option<Pron> = tokens.map(Phone::parse).collect();
             let pron = pron.filter(|p| !p.is_empty()).ok_or_else(bad)?;
-            lex.entries.entry(word).or_default().push(pron);
+            entries.entry(word).or_default().push(pron);
         }
-        Ok(lex)
+        Ok(Lexicon {
+            entries: Arc::new(entries),
+            ..Lexicon::default()
+        })
     }
 
     /// Adds a pragma word (`spec/PROSODY.md` §3). Never overrides an existing word.
@@ -115,26 +121,30 @@ impl Lexicon {
             .filter(|p| !p.is_empty())
             .ok_or(PragmaError::Malformed)?;
         let key = word.to_lowercase();
-        if self.entries.contains_key(&key) {
+        if self.get(&key).is_some() {
             return Err(PragmaError::Redefines);
         }
-        self.entries.insert(key, vec![pron]);
+        self.extra.insert(key, vec![pron]);
         Ok(())
     }
 
     /// Every word with its pronunciations, in no particular order.
     pub fn words(&self) -> impl Iterator<Item = (&str, &[Pron])> {
-        self.entries.iter().map(|(w, p)| (w.as_str(), p.as_slice()))
+        self.entries
+            .iter()
+            .chain(&self.extra)
+            .map(|(w, p)| (w.as_str(), p.as_slice()))
     }
 
     /// Loads the common-word list (one lowercase word per line).
     pub fn set_common_words(&mut self, text: &str) {
-        self.common = text
-            .lines()
-            .map(str::trim)
-            .filter(|w| !w.is_empty())
-            .map(String::from)
-            .collect();
+        self.common = Arc::new(
+            text.lines()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(String::from)
+                .collect(),
+        );
     }
 
     /// Whether `word` is in the common-word list (`false` when no list is loaded).
@@ -147,13 +157,13 @@ impl Lexicon {
     #[must_use]
     pub fn lookup(&self, word: &str) -> Option<&[Pron]> {
         let w = word.to_lowercase();
-        self.entries
-            .get(&w)
-            .or_else(|| {
-                w.rsplit_once('-')
-                    .and_then(|(_, last)| self.entries.get(last))
-            })
+        self.get(&w)
+            .or_else(|| w.rsplit_once('-').and_then(|(_, last)| self.get(last)))
             .map(Vec::as_slice)
+    }
+
+    fn get(&self, key: &str) -> Option<&Vec<Pron>> {
+        self.entries.get(key).or_else(|| self.extra.get(key))
     }
 }
 

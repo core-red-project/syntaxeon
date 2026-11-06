@@ -6,11 +6,11 @@
 //!
 //! Surface forms are data (`rules`); `grammar` holds the generic readers.
 //!
-//! shortcut: expression parsing is not memoized and is exponential in the worst case;
-//! revisit before sentences get long or the grammar grows.
+//! The three expression levels (`operand`, `arith`, `expr`) are memoized per start token;
+//! before that, nested calls were exponential (16 levels did not finish).
 
 mod driver;
 mod grammar;
 mod rules;
 
-pub use driver::{parse_program, statement_readings};
+pub use driver::{parse_program, preferred_spellings, statement_readings};

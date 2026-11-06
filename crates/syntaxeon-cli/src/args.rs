@@ -11,6 +11,10 @@ pub struct Opts {
     pub all: bool,
     /// `rhymes`: how many words to show; `0` means no limit.
     pub limit: Option<usize>,
+    /// `fmt`: rewrite the file in place.
+    pub write: bool,
+    /// `fmt`: change nothing, exit 1 if the file is not formatted.
+    pub check: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -22,12 +26,14 @@ pub enum Cmd {
     Ast(String),
     Run(String),
     Rhymes(String),
+    Fmt(String),
     Completions(String),
     Man,
 }
 
-pub const COMMANDS: [&str; 9] = [
+pub const COMMANDS: [&str; 10] = [
     "check",
+    "fmt",
     "explain",
     "ast",
     "run",
@@ -85,6 +91,8 @@ pub fn parse(args: &[String]) -> Result<(Opts, Cmd), Usage> {
             "--json" => opts.json = true,
             "--no-color" => opts.no_color = true,
             "--all" => opts.all = true,
+            "--write" => opts.write = true,
+            "--check" => opts.check = true,
             "--limit" => {
                 let n = it
                     .next()
@@ -118,6 +126,7 @@ pub fn parse(args: &[String]) -> Result<(Opts, Cmd), Usage> {
         "man" => Cmd::Man,
         "check" => Cmd::Check(one(rest, "a file (or '-' for stdin)")?),
         "explain" => Cmd::Explain(one(rest, "a file (or '-' for stdin)")?),
+        "fmt" => Cmd::Fmt(one(rest, "a file (or '-' for stdin)")?),
         "run" => Cmd::Run(one(rest, "a file")?),
         "rhymes" => Cmd::Rhymes(one(rest, "a word")?),
         "ast" => Cmd::Ast(one(rest, "a file (or '-' for stdin)")?),

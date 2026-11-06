@@ -3,11 +3,14 @@
 //! After an error the offending expression has no type (`None`) and silently poisons its
 //! users, so one mistake reports once instead of cascading.
 //!
-//! shortcut: diagnostics carry the statement's line only; expression spans do not exist yet.
+//! A diagnostic about an expression carries its span; one about a whole statement or stanza
+//! carries only the line.
 
 use std::collections::HashMap;
 
-use syntaxeon_core::{BinOp, Expr, Program, Stanza, Stmt, StmtKind, Target, Type, UnOp};
+use syntaxeon_core::{
+    BinOp, Expr, ExprKind, Program, Span, Stanza, Stmt, StmtKind, Target, Type, UnOp,
+};
 use syntaxeon_lex::Diagnostic;
 
 const BUILTINS: [&str; 8] = [
@@ -29,6 +32,8 @@ struct Cx<'a> {
     scopes: Vec<HashMap<String, Binding>>,
     diags: Vec<Diagnostic>,
     line: usize,
+    /// The expression being checked, so an error points at it and not at the whole line.
+    span: Option<Span>,
     ret: Type,
     is_entry: bool,
 }
@@ -41,6 +46,7 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
         scopes: Vec::new(),
         diags: Vec::new(),
         line: 0,
+        span: None,
         ret: Type::Unit,
         is_entry: false,
     };
@@ -101,6 +107,7 @@ impl Cx<'_> {
             code,
             message: message.to_string(),
             line: self.line,
+            span: self.span,
         });
     }
 
@@ -166,12 +173,13 @@ impl Cx<'_> {
         if let Some(got) = self.infer(e, Some(want))
             && got != *want
         {
-            self.mismatch(what, want, &got);
+            self.at(e, |cx| cx.mismatch(what, want, &got));
         }
     }
 
     fn stmt(&mut self, s: &Stmt) {
         self.line = s.line;
+        self.span = None;
         match &s.kind {
             StmtKind::Decl {
                 name,
@@ -211,14 +219,18 @@ impl Cx<'_> {
         match value {
             Some(e) if self.is_entry => {
                 self.infer(e, None);
-                self.err("SXP-405", "the entry stanza cannot return a value");
+                self.at(e, |cx| {
+                    cx.err("SXP-405", "the entry stanza cannot return a value");
+                });
             }
             Some(e) if ret == Type::Unit => {
                 self.infer(e, None);
-                self.err(
-                    "SXP-402",
-                    "this stanza declares no result, so it cannot return a value",
-                );
+                self.at(e, |cx| {
+                    cx.err(
+                        "SXP-402",
+                        "this stanza declares no result, so it cannot return a value",
+                    );
+                });
             }
             Some(e) => self.expect(e, &ret, "returned value"),
             None if ret != Type::Unit => {
@@ -233,7 +245,9 @@ impl Cx<'_> {
         let bound = match (ty, got) {
             (Some(want), Some(got)) => {
                 if *want != got {
-                    self.mismatch(&format!("declaration of {name:?}"), want, &got);
+                    self.at(init, |cx| {
+                        cx.mismatch(&format!("declaration of {name:?}"), want, &got);
+                    });
                 }
                 Some(want.clone())
             }
@@ -301,15 +315,28 @@ impl Cx<'_> {
         }
     }
 
+    /// Runs `f` with errors pointing at `e`.
+    fn at<T>(&mut self, e: &Expr, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.span;
+        self.span = (!e.span.is_empty()).then_some(e.span);
+        let out = f(self);
+        self.span = saved;
+        out
+    }
+
     fn infer(&mut self, e: &Expr, want: Option<&Type>) -> Option<Type> {
-        match e {
-            Expr::Int(_) => Some(Type::Integer),
-            Expr::Float(_) => Some(Type::Float),
-            Expr::Bool(_) => Some(Type::Boolean),
-            Expr::Str(_) => Some(Type::String),
-            Expr::Char(_) => Some(Type::Character),
-            Expr::EmptyList(t) => Some(Type::List(Box::new(t.clone()))),
-            Expr::Var(n) => {
+        self.at(e, |cx| cx.infer_kind(e, want))
+    }
+
+    fn infer_kind(&mut self, e: &Expr, want: Option<&Type>) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Int(_) => Some(Type::Integer),
+            ExprKind::Float(_) => Some(Type::Float),
+            ExprKind::Bool(_) => Some(Type::Boolean),
+            ExprKind::Str(_) => Some(Type::String),
+            ExprKind::Char(_) => Some(Type::Character),
+            ExprKind::EmptyList(t) => Some(Type::List(Box::new(t.clone()))),
+            ExprKind::Var(n) => {
                 if let Some((t, _)) = self.lookup(n) {
                     t.clone()
                 } else {
@@ -317,10 +344,10 @@ impl Cx<'_> {
                     None
                 }
             }
-            Expr::Unary(op, a) => self.unary(*op, a),
-            Expr::Binary(op, a, b) => self.binary(*op, a, b),
-            Expr::List(xs) => self.list(xs, want),
-            Expr::Index(l, i) => {
+            ExprKind::Unary(op, a) => self.unary(*op, a),
+            ExprKind::Binary(op, a, b) => self.binary(*op, a, b),
+            ExprKind::List(xs) => self.list(xs, want),
+            ExprKind::Index(l, i) => {
                 let tl = self.infer(l, None);
                 self.expect(i, &Type::Integer, "index");
                 match tl? {
@@ -332,7 +359,7 @@ impl Cx<'_> {
                     }
                 }
             }
-            Expr::Call(n, args) => self.call(n, args),
+            ExprKind::Call(n, args) => self.call(n, args),
         }
     }
 
@@ -353,7 +380,7 @@ impl Cx<'_> {
         let tb = self.infer(b, None);
         let (ta, tb) = (ta?, tb?);
         if ta != tb {
-            self.mismatch(&format!("{op:?}"), &ta, &tb);
+            self.at(b, |cx| cx.mismatch(&format!("{op:?}"), &ta, &tb));
             return None;
         }
         let ok = match op {
@@ -467,7 +494,9 @@ impl Cx<'_> {
         if ok {
             Some(out)
         } else {
-            self.err("SXP-402", &format!("{name:?} cannot take {t:?}"));
+            self.at(&args[0], |cx| {
+                cx.err("SXP-402", &format!("{name:?} cannot take {t:?}"));
+            });
             None
         }
     }

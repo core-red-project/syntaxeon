@@ -414,3 +414,175 @@ fn rhymes_default_list_is_common_words_only() {
     let then = exec(&["rhymes", "then", "--limit", "0"], "").out;
     assert!(then.lines().any(|w| w == "men") && !then.lines().any(|w| w == "ren"));
 }
+
+// ---- fmt -----------------------------------------------------------------------------------
+
+/// The AST dump without source positions, to compare meaning across formatting.
+fn ast_of(src: &str) -> String {
+    let o = exec(&["ast", "-"], src);
+    assert_eq!(o.code, 0, "{}", o.err);
+    o.out
+        .lines()
+        .filter(|l| !l.contains("line:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn fmt_keeps_examples_valid_equal_in_meaning_and_stable() {
+    let mut seen = 0;
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples")).unwrap()
+    {
+        let path = entry.unwrap().path();
+        let src = std::fs::read_to_string(&path).unwrap();
+        let once = exec(&["fmt", "-"], &src);
+        assert_eq!(once.code, 0, "{path:?}: {}", once.err);
+        assert_eq!(
+            exec(&["check", "-q", "-"], &once.out).code,
+            0,
+            "{path:?} stopped rhyming"
+        );
+        assert_eq!(ast_of(&once.out), ast_of(&src), "{path:?} changed meaning");
+        assert_eq!(
+            exec(&["fmt", "-"], &once.out).out,
+            once.out,
+            "{path:?} not stable"
+        );
+        seen += 1;
+    }
+    assert!(seen >= 8);
+}
+
+#[test]
+fn fmt_prefers_the_declarative_spelling_when_the_rhyme_survives() {
+    let src = "Thus begins the tale of men:\nSpeak \"Hello again\".\nLet the pile, a whole number, become ten.\nSpeak \"Amen\".\n";
+    assert_eq!(exec(&["check", "-q", "-"], src).code, 0);
+    let o = exec(&["fmt", "-"], src);
+    assert_eq!(
+        o.out,
+        "Thus begins the tale of men:\nSpeak \"Hello again\".\nThe pile, a whole number, shall become ten.\nSpeak \"Amen\".\n"
+    );
+}
+
+#[test]
+fn fmt_refuses_a_rewrite_that_would_break_the_rhyme() {
+    // "Ten shall the pile … become." ends in `become`, which rhymes with `thumb`; the
+    // preferred spelling would end in `ten` and no longer rhyme.
+    let src = "Thus begins the tale of thumb:\nTen shall the pile, a whole number, become.\n";
+    assert_eq!(exec(&["check", "-q", "-"], src).code, 0);
+    assert_eq!(exec(&["fmt", "-"], src).out, src);
+}
+
+#[test]
+fn fmt_normalizes_whitespace_and_accepts_unrhymed_programs() {
+    let o = exec(
+        &["fmt", "-"],
+        "\n\nThus begins the tale of men:   \nSpeak \"Hello\".  \n\n\n\n",
+    );
+    assert_eq!(
+        (o.code, o.out.as_str()),
+        (0, "Thus begins the tale of men:\nSpeak \"Hello\".\n")
+    );
+}
+
+#[test]
+fn fmt_only_formats_valid_programs() {
+    let o = exec(&["fmt", "-"], BAD_TYPE_AND_RHYME);
+    assert_eq!(o.code, 1);
+    assert_eq!(o.out, "");
+    assert!(o.err.contains("SXP-411"), "{}", o.err);
+}
+
+#[test]
+fn fmt_check_and_write() {
+    let dir = std::env::temp_dir().join(format!("syntaxeon-fmt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("tale.sxe");
+    let path = file.to_str().unwrap();
+    std::fs::write(&file, "Thus begins the tale of men:  \nSpeak \"Hello again\".\nProclaim the text of ten.\nSpeak \"Amen\".\n").unwrap();
+    let check = exec(&["fmt", "--check", path], "");
+    assert_eq!((check.code, check.out.as_str()), (1, ""));
+    assert!(check.err.contains("not formatted"), "{}", check.err);
+    assert_eq!(exec(&["fmt", "--write", path], "").code, 0);
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("  \n"));
+    assert_eq!(exec(&["fmt", "--check", path], "").code, 0);
+    assert_eq!(exec(&["fmt", "--write", "-"], "").code, 2);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn fmt_respells_a_sentence_split_over_two_lines_when_the_rhyme_survives() {
+    // The split sentence gives verses `hen` and `ten`; joined, the stanza still rhymes.
+    let src = "Thus begins the tale of men:\nSpeak \"Hello again\".\nLet the hen,\na whole number, become ten.\nSpeak \"Amen\".\n";
+    assert_eq!(exec(&["check", "-q", "-"], src).code, 0);
+    assert_eq!(
+        exec(&["fmt", "-"], src).out,
+        "Thus begins the tale of men:\nSpeak \"Hello again\".\nThe hen, a whole number, shall become ten.\nSpeak \"Amen\".\n"
+    );
+}
+
+#[test]
+fn fmt_keeps_a_split_sentence_whose_join_would_break_the_rhyme() {
+    // Split, the stanza is AABB (men/hen, ten/amen); joined it is AAA and `men`/`amen` share
+    // an onset, so the file must stay as written.
+    let src = "Thus begins the tale of men:\nLet the hen,\na whole number, become ten.\nSpeak \"Amen\".\n";
+    assert_eq!(exec(&["check", "-q", "-"], src).code, 0);
+    assert_eq!(exec(&["fmt", "-"], src).out, src);
+}
+
+// ---- expression spans ----------------------------------------------------------------------
+
+#[test]
+fn type_errors_underline_the_offending_expression() {
+    let src = "Thus begins the tale of men:\nLet the pile, a whole number, become the sum of one and \"ten\".\n";
+    let o = exec(&["check", "-"], src);
+    assert_eq!(o.code, 1);
+    assert!(o.err.contains("-:2:57"), "{}", o.err);
+    assert!(
+        o.err.contains(
+            "2 | Let the pile, a whole number, become the sum of one and \"ten\".\n  |                                                         ^^^^^\n"
+        ),
+        "{}",
+        o.err
+    );
+}
+
+#[test]
+fn json_diagnostics_carry_column_and_span_or_null() {
+    let src = "Thus begins the tale of men:\nLet the pile, a whole number, become the sum of one and \"ten\".\nSpeak the missing.\n";
+    let o = exec(&["--json", "check", "-"], src);
+    assert!(
+        o.out
+            .contains("\"line\":2,\"column\":57,\"span\":{\"start\":"),
+        "{}",
+        o.out
+    );
+    // A statement-level error has no expression to point at.
+    let o = exec(&["--json", "check", "-"], BAD_RHYME);
+    assert!(o.out.contains("\"column\":null,\"span\":null"), "{}", o.out);
+}
+
+#[test]
+fn runtime_errors_underline_the_failing_expression() {
+    let dir = std::env::temp_dir().join(format!("syntaxeon-span-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("tale.sxe");
+    std::fs::write(
+        &file,
+        "Thus begins the tale of thumb:\nZero shall the hen, a whole number, become.\nLet the den, a whole number, become the quotient of ten and the hen.\nSpeak \"Amen\".\n",
+    )
+    .unwrap();
+    let path = file.to_str().unwrap();
+    assert_eq!(exec(&["check", "-q", path], "").code, 0);
+    let o = exec(&["run", path], "");
+    assert_eq!(o.code, 1);
+    assert!(o.err.contains("SXP-502"), "{}", o.err);
+    assert!(o.err.contains(":3:37"), "{}", o.err);
+    assert!(
+        o.err
+            .contains(&"^".repeat("the quotient of ten and the hen".len())),
+        "{}",
+        o.err
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

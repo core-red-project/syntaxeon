@@ -276,6 +276,18 @@ fn env_or(name: &str, default: u64) -> u64 {
 }
 
 /// A coarse signature of the constructs in a sentence, for grouping ambiguities.
+/// Iteration count: `SYNTAXEON_FUZZ_ITERS` when set, else the test's own default.
+fn iters_or(default: usize) -> usize {
+    env_or("SYNTAXEON_FUZZ_ITERS", default as u64)
+        .try_into()
+        .unwrap()
+}
+
+/// Varies a test's seed with `SYNTAXEON_FUZZ_SEED` (0 keeps the fixed seeds).
+fn seed_offset() -> u64 {
+    env_or("SYNTAXEON_FUZZ_SEED", 0)
+}
+
 fn features(s: &str) -> String {
     let mut tags = Vec::new();
     for (needle, tag) in [
@@ -378,7 +390,13 @@ fn explore_wild() {
 #[test]
 fn valid_sentences_have_exactly_one_reading() {
     for seed in 1_u64..=4 {
-        let r = run(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 4_000, 3, VALID);
+        let r = run(
+            seed.wrapping_add(seed_offset())
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            iters_or(4_000),
+            3,
+            VALID,
+        );
         assert!(
             r.zero.is_empty(),
             "no reading: {:?}",
@@ -392,7 +410,13 @@ fn valid_sentences_have_exactly_one_reading() {
 #[test]
 fn free_sentences_are_never_ambiguous() {
     for seed in 1_u64..=4 {
-        let r = run(seed.wrapping_mul(0xD1B5_4A32_D192_ED03), 4_000, 3, WILD);
+        let r = run(
+            seed.wrapping_add(seed_offset())
+                .wrapping_mul(0xD1B5_4A32_D192_ED03),
+            iters_or(4_000),
+            3,
+            WILD,
+        );
         assert!(r.ambiguous.is_empty(), "ambiguous: {:?}", r.ambiguous);
     }
 }
@@ -478,7 +502,7 @@ fn soup(seed: u64, iters: usize) -> Vec<String> {
 
 #[test]
 fn token_soup_is_never_ambiguous() {
-    let amb = soup(0xA5A5_5A5A_1234_5678, 60_000);
+    let amb = soup(0xA5A5_5A5A_1234_5678 ^ seed_offset(), iters_or(60_000));
     assert!(
         amb.is_empty(),
         "{} ambiguous, e.g. {:?}",
@@ -525,8 +549,8 @@ fn random_type(rng: &mut Rng) -> String {
 /// Stanza headers with random parameter lists, result types and titles read one way only.
 #[test]
 fn stanza_headers_are_never_ambiguous() {
-    let mut rng = Rng(0xFEED_FACE_CAFE_BEEF);
-    for _ in 0..3_000 {
+    let mut rng = Rng(0xFEED_FACE_CAFE_BEEF ^ seed_offset());
+    for _ in 0..iters_or(3_000) {
         let title = rng.pick(&["double", "tale of men", "rhyme in reason", "song of ten"]);
         let mut header = format!("To {title}");
         let n = rng.below(4);
@@ -558,10 +582,10 @@ fn stanza_headers_are_never_ambiguous() {
 #[test]
 fn block_headers_are_never_ambiguous() {
     let mut g = Gen {
-        rng: Rng(0x00DD_BA11_C0FF_EE00),
+        rng: Rng(0x00DD_BA11_C0FF_EE00 ^ seed_offset()),
         f: VALID,
     };
-    for _ in 0..3_000 {
+    for _ in 0..iters_or(3_000) {
         let e = g.expr(2).text;
         let header = match g.rng.below(3) {
             0 => format!("If {e}, then:"),

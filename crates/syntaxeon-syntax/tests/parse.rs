@@ -415,3 +415,52 @@ fn return_forms() {
     assert_eq!(body("Give back nothing.")[0], StmtKind::Return(None));
     assert_eq!(body("Return 3.")[0], StmtKind::Return(Some(Expr::Int(3))));
 }
+
+/// Nested calls were exponential before the expression levels were memoized (16 levels never
+/// finished); 60 levels must parse to exactly one reading, quickly.
+#[test]
+fn deeply_nested_calls_parse_in_linear_time() {
+    let mut e = String::from("1");
+    for _ in 0..60 {
+        e = format!("calling twice with {e}");
+    }
+    let start = std::time::Instant::now();
+    let readings = syntaxeon_syntax::statement_readings(&format!("Proclaim the text of {e}."));
+    assert_eq!(readings.len(), 1);
+    assert!(
+        start.elapsed().as_secs() < 5,
+        "too slow: {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn preferred_spellings_respell_within_one_class_only() {
+    use syntaxeon_syntax::preferred_spellings;
+    assert_eq!(
+        preferred_spellings("Return the sum of one and two"),
+        ["Give back the sum of one and two"]
+    );
+    assert_eq!(preferred_spellings("Return nothing"), ["Give back nothing"]);
+    assert_eq!(preferred_spellings("Give back ten"), Vec::<String>::new());
+    assert_eq!(
+        preferred_spellings("Let the pile now be ten"),
+        ["The pile shall now be ten"]
+    );
+    assert_eq!(
+        preferred_spellings("Ten shall the pile, a whole number, become"),
+        [
+            "The pile, a whole number, shall become ten",
+            "Let the pile, a whole number, become ten"
+        ]
+    );
+    // Single-form sentences have no other spelling.
+    assert_eq!(
+        preferred_spellings("Proclaim the text of ten"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        preferred_spellings("Call twice with ten"),
+        Vec::<String>::new()
+    );
+}

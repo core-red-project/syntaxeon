@@ -20,6 +20,7 @@ pub fn check(lexed: &Lexed, stanzas: &[Stanza], lex: &mut Lexicon) -> Vec<Diagno
                 code: e.code(),
                 message,
                 line: p.line,
+                span: None,
             });
         }
     }
@@ -38,6 +39,7 @@ pub fn check(lexed: &Lexed, stanzas: &[Stanza], lex: &mut Lexicon) -> Vec<Diagno
                     code: "SXP-203",
                     message: "verse has no extractable end word".to_string(),
                     line: v.line,
+                    span: None,
                 });
             }
         }
@@ -59,6 +61,7 @@ pub fn check(lexed: &Lexed, stanzas: &[Stanza], lex: &mut Lexicon) -> Vec<Diagno
                 code: e.code(),
                 message,
                 line: first.line,
+                span: None,
             });
         }
     }

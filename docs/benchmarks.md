@@ -15,10 +15,12 @@ hyperfine --warmup 3 \
 
 ## Baselines
 
-No baseline is recorded yet: hyperfine was not installed on the machine where the benchmark recipe was written. A single unmeasured `time` run on an Apple silicon laptop (2026-11-05) gave about 0.003 s for `--version` and 0.13 s for `run benches/fixture.sxe`; treat these as a rough order of magnitude, not a baseline.
+Recorded with the exact command above on release builds (`just bench`, hyperfine 2.0.0, 3 warm-up runs). Memory is the peak resident set reported by hyperfine.
 
-When a baseline is recorded, add a row with the date, machine, exact command and means, and note any release that is more than 10 % slower than the previous row in the changelog.
+| Date | Machine | Command | Mean | Memory |
+|---|---|---|---|---|
+| 2026-11-06 | Apple M4 Pro, 24 GiB, macOS 26.6 | `syntaxeon --version` | 2.0 ms ± 0.3 | 1.6 MiB |
+| 2026-11-06 | Apple M4 Pro, 24 GiB, macOS 26.6 | `syntaxeon check benches/fixture.sxe` | 53.6 ms ± 1.3 | 72.3 MiB |
+| 2026-11-06 | Apple M4 Pro, 24 GiB, macOS 26.6 | `syntaxeon run benches/fixture.sxe` | 105.0 ms ± 2.3 | 72.3 MiB |
 
-| Date | Machine | Command | Mean |
-|---|---|---|---|
-| — | — | — | — |
+`check` is dominated by building the pronunciation lexicon (about 135 000 entries), hence the 72 MiB; `--version` does not touch it. A release that is more than 10 % slower than the previous row needs a note in the changelog.

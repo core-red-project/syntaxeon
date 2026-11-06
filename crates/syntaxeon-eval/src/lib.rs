@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
-use syntaxeon_core::{BinOp, Expr, Program, Stanza, Stmt, StmtKind, Target, UnOp};
+use syntaxeon_core::{BinOp, Expr, ExprKind, Program, Span, Stanza, Stmt, StmtKind, Target, UnOp};
 
 /// 2^63 as a float: the exclusive upper bound of `Integer`.
 const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
@@ -34,6 +34,8 @@ pub struct RuntimeError {
     pub code: &'static str,
     pub message: String,
     pub line: usize,
+    /// The expression being evaluated when it failed, if the failure is about one.
+    pub span: Option<Span>,
 }
 
 type Res<T> = Result<T, RuntimeError>;
@@ -50,6 +52,7 @@ struct Interp<'a> {
     out: &'a mut dyn Write,
     depth: usize,
     line: usize,
+    span: Option<Span>,
 }
 
 /// Runs the entry stanza (the first one). Program output goes to `out`.
@@ -63,6 +66,7 @@ pub fn run(
             code: "SXP-599",
             message: "no entry stanza".into(),
             line: 0,
+            span: None,
         });
     };
     let mut it = Interp {
@@ -75,6 +79,7 @@ pub fn run(
         out,
         depth: 0,
         line: entry.line,
+        span: None,
     };
     it.call(entry, Vec::new())?;
     it.out
@@ -103,6 +108,7 @@ impl Interp<'_> {
             code,
             message: message.into(),
             line: self.line,
+            span: self.span,
         }
     }
 
@@ -146,6 +152,7 @@ impl Interp<'_> {
 
     fn stmt(&mut self, env: &mut Scopes, s: &Stmt) -> Res<Flow> {
         self.line = s.line;
+        self.span = None;
         match &s.kind {
             StmtKind::Decl { name, init, .. } => {
                 let v = self.eval(env, init)?;
@@ -169,6 +176,7 @@ impl Interp<'_> {
             StmtKind::While { cond, body } => {
                 while truthy(&self.eval(env, cond)?) {
                     self.line = s.line;
+                    self.span = None;
                     if let Flow::Return(v) = self.block(env, body)? {
                         return Ok(Flow::Return(v));
                     }
@@ -229,57 +237,65 @@ impl Interp<'_> {
         Ok(())
     }
 
-    #[allow(clippy::many_single_char_names)] // l/i/a/b name the operands of the AST node
     fn eval(&mut self, env: &mut Scopes, e: &Expr) -> Res<Value> {
-        Ok(match e {
-            Expr::Int(n) => Value::Int(*n),
-            Expr::Float(f) => Value::Float(*f),
-            Expr::Bool(b) => Value::Bool(*b),
-            Expr::Str(s) => Value::Str(s.clone()),
-            Expr::Char(c) => Value::Char(*c),
-            Expr::EmptyList(_) => Value::List(vec![]),
-            Expr::Var(n) => env
+        let saved = self.span;
+        self.span = (!e.span.is_empty()).then_some(e.span);
+        let out = self.eval_kind(env, e);
+        self.span = saved;
+        out
+    }
+
+    #[allow(clippy::many_single_char_names)] // l/i/a/b name the operands of the AST node
+    fn eval_kind(&mut self, env: &mut Scopes, e: &Expr) -> Res<Value> {
+        Ok(match &e.kind {
+            ExprKind::Int(n) => Value::Int(*n),
+            ExprKind::Float(f) => Value::Float(*f),
+            ExprKind::Bool(b) => Value::Bool(*b),
+            ExprKind::Str(s) => Value::Str(s.clone()),
+            ExprKind::Char(c) => Value::Char(*c),
+            ExprKind::EmptyList(_) => Value::List(vec![]),
+            ExprKind::Var(n) => env
                 .iter()
                 .rev()
                 .find_map(|s| s.get(n))
                 .cloned()
                 .ok_or_else(|| self.internal("unbound name"))?,
-            Expr::Unary(op, a) => {
+            ExprKind::Unary(op, a) => {
                 let v = self.eval(env, a)?;
                 self.unary(*op, v)?
             }
-            Expr::Binary(BinOp::And, a, b) => {
+            ExprKind::Binary(BinOp::And, a, b) => {
                 if truthy(&self.eval(env, a)?) {
                     self.eval(env, b)?
                 } else {
                     Value::Bool(false)
                 }
             }
-            Expr::Binary(BinOp::Or, a, b) => {
+            ExprKind::Binary(BinOp::Or, a, b) => {
                 if truthy(&self.eval(env, a)?) {
                     Value::Bool(true)
                 } else {
                     self.eval(env, b)?
                 }
             }
-            Expr::Binary(op, a, b) => {
+            ExprKind::Binary(op, a, b) => {
                 let x = self.eval(env, a)?;
                 let y = self.eval(env, b)?;
                 self.binary(*op, &x, &y)?
             }
-            Expr::List(xs) => Value::List(
+            ExprKind::List(xs) => Value::List(
                 xs.iter()
                     .map(|x| self.eval(env, x))
                     .collect::<Res<Vec<_>>>()?,
             ),
-            Expr::Index(l, i) => {
+            ExprKind::Index(l, i) => {
                 let l = self.eval(env, l)?;
                 let Value::Int(i) = self.eval(env, i)? else {
                     return Err(self.internal("index"));
                 };
                 self.index(l, i)?
             }
-            Expr::Call(name, args) => {
+            ExprKind::Call(name, args) => {
                 let vals = args
                     .iter()
                     .map(|a| self.eval(env, a))

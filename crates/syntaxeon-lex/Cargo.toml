@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+syntaxeon-core.workspace = true
 syntaxeon-lexicon.workspace = true
 
 [lints]

@@ -60,6 +60,7 @@ pub fn analyze(src: &str, phase: &mut dyn FnMut(&str)) -> Analysis {
                 code: e.code(),
                 message: e.to_string(),
                 line: 0,
+                span: None,
             }];
         }
     }

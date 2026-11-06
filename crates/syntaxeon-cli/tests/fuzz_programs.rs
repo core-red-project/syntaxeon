@@ -7,8 +7,8 @@
 //! the real one. The program goes through lexer → parser → checker → evaluator and its output
 //! and error code must equal the model's. Mutated programs must be rejected, never crash.
 //!
-//! Rhyme is not generated, so prosody is not part of this pipeline; it is fuzzed separately
-//! with the lexicon. Deterministic: a fixed xorshift seed, no dependencies.
+//! Prosody is fuzzed too, but apart from this pipeline: end words are steered by pragmas and
+//! every stanza is compared with a rhyme oracle. Deterministic: a fixed xorshift seed.
 //! `SYNTAXEON_FUZZ_ITERS` and `SYNTAXEON_FUZZ_SEED` scale and vary a run.
 
 use std::collections::HashMap;
@@ -938,4 +938,743 @@ fn mutated_programs_never_crash_prosody() {
         let mut lex = lexicon.clone();
         let _ = prosody::check(&lexed, &verses, &mut lex);
     }
+}
+
+// ---- rhyme in generated programs ---------------------------------------------------------
+
+/// A rhyme oracle over the raw dictionary, written from `spec/PROSODY.md` §4 and §7 and
+/// sharing no code with the crate (a copy of the one in the lexicon's own fuzz test).
+/// shortcut: duplicated across test crates, share it if a third user appears.
+mod oracle {
+    use std::collections::HashMap;
+
+    pub type Dict = HashMap<String, Vec<Vec<String>>>;
+
+    pub fn load() -> Dict {
+        let mut m = Dict::new();
+        let text = include_str!("../../syntaxeon-lexicon/lexicon/cmudict.dict");
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("");
+            let mut it = line.split_whitespace();
+            let Some(head) = it.next() else { continue };
+            let word = head.split('(').next().unwrap().to_lowercase();
+            m.entry(word)
+                .or_default()
+                .push(it.map(str::to_string).collect());
+        }
+        m
+    }
+
+    fn bare(t: &str) -> String {
+        t.trim_end_matches(char::is_numeric).to_string()
+    }
+
+    /// (tail without stress digits, onset).
+    pub fn split(p: &[String]) -> Option<(Vec<String>, Option<String>)> {
+        let ends = |d: char| p.iter().rposition(|t| t.ends_with(d));
+        let idx = ends('1')
+            .or_else(|| ends('2'))
+            .or_else(|| p.iter().rposition(|t| t.ends_with(char::is_numeric)))?;
+        let tail = p[idx..].iter().map(|t| bare(t)).collect();
+        Some((tail, idx.checked_sub(1).map(|i| bare(&p[i]))))
+    }
+
+    /// Hyphenated words rhyme on their last component (§5).
+    pub fn key(w: &str) -> &str {
+        w.rsplit('-').next().unwrap_or(w)
+    }
+
+    pub fn rhyme(d: &Dict, a: &str, b: &str) -> Option<bool> {
+        let (pa, pb) = (d.get(key(a))?, d.get(key(b))?);
+        Some(pa.iter().any(|x| {
+            pb.iter().any(|y| match (split(x), split(y)) {
+                (Some((tx, ox)), Some((ty, oy))) => tx == ty && ox != oy,
+                _ => false,
+            })
+        }))
+    }
+
+    /// Couplet chain, with the last three verses forming one group when `n` is odd.
+    pub fn schemes(n: usize) -> Vec<Vec<usize>> {
+        if n < 2 {
+            return vec![];
+        }
+        let mut c: Vec<usize> = (0..n / 2 * 2).map(|i| i / 2).collect();
+        if n % 2 == 1 {
+            c.push(c.last().copied().unwrap_or(0));
+        }
+        let mut out = vec![c];
+        if n == 4 {
+            out.extend([vec![0, 1, 0, 1], vec![0, 1, 1, 0]]);
+        }
+        out
+    }
+
+    /// `None` when a word is unknown (the crate must report `SXP-301`).
+    pub fn stanza_ok(d: &Dict, words: &[&str]) -> bool {
+        schemes(words.len()).iter().any(|s| {
+            s.iter().enumerate().all(|(i, g)| {
+                let first = s.iter().position(|x| x == g).unwrap();
+                first == i || rhyme(d, words[first], words[i]) == Some(true)
+            })
+        })
+    }
+}
+
+const ONSETS: &[&str] = &[
+    "B", "D", "F", "G", "K", "L", "M", "N", "P", "S", "T", "V", "Z",
+];
+const TAILS: &[&str] = &["AY1 T", "EH1 N", "OW1 L", "ER1 S", "AA1 K T", "IY1 M"];
+
+/// Renames every program name to a word the lexicon cannot know, so that a pragma can give it
+/// whatever pronunciation a stanza needs.
+fn unknown_names(src: &str) -> String {
+    let mut out = src.to_string();
+    for n in VARS.iter().chain(FUNS).chain(PARAMS) {
+        let mut next = String::new();
+        let mut word = String::new();
+        let flush = |w: &mut String, next: &mut String| {
+            if w == n {
+                next.push_str("xq");
+            }
+            next.push_str(w);
+            w.clear();
+        };
+        for c in out.chars() {
+            if c.is_ascii_alphabetic() {
+                word.push(c);
+            } else {
+                flush(&mut word, &mut next);
+                next.push(c);
+            }
+        }
+        flush(&mut word, &mut next);
+        out = next;
+    }
+    out
+}
+
+/// Steers the end words of each rhyme group by pragma, except for a random third of the groups.
+fn steer(src: &str, dict: &oracle::Dict, rng: &mut Rng) -> String {
+    let lexed = lex(src);
+    let mut pragmas: HashMap<String, String> = HashMap::new();
+    for stanza in stanzas(&lexed) {
+        let words: Vec<String> = stanza
+            .verses
+            .iter()
+            .filter(|v| !v.structural)
+            .filter_map(|v| v.end_word.clone().ok())
+            .collect();
+        let n = words.len();
+        let Some(scheme) = oracle::schemes(n).into_iter().next() else {
+            continue;
+        };
+        for (i, g) in scheme.iter().enumerate() {
+            let lead = scheme.iter().position(|x| x == g).unwrap();
+            if lead == i || rng.below(3) == 0 {
+                continue;
+            }
+            let free = |w: &str| w.starts_with("xq") && !pragmas.contains_key(w);
+            let tail_of =
+                |w: &str, pragmas: &HashMap<String, String>| -> Option<(String, String)> {
+                    let toks: Vec<String> = match pragmas.get(w) {
+                        Some(p) => p.split(' ').map(str::to_string).collect(),
+                        None => dict.get(oracle::key(w))?.first()?.clone(),
+                    };
+                    let (tail, onset) = oracle::split(&toks)?;
+                    let idx = toks.len() - tail.len();
+                    Some((toks[idx..].join(" "), onset.unwrap_or_default()))
+                };
+            let (a, b) = (&words[lead], &words[i]);
+            let (anchor, target) = if free(b) {
+                (a, b)
+            } else if free(a) {
+                (b, a)
+            } else {
+                continue;
+            };
+            let (tail, onset) = if free(anchor) {
+                // Both ends are free: pick the tail and let `anchor` take its own onset first.
+                let tail = TAILS[rng.below(TAILS.len())].to_string();
+                let o = ONSETS[rng.below(ONSETS.len())].to_string();
+                pragmas.insert(anchor.clone(), format!("{o} {tail}"));
+                (tail, o)
+            } else if let Some(t) = tail_of(anchor, &pragmas) {
+                t
+            } else {
+                continue;
+            };
+            let choices: Vec<&&str> = ONSETS.iter().filter(|o| **o != onset).collect();
+            let o = choices[rng.below(choices.len())];
+            pragmas.insert(target.clone(), format!("{o} {tail}"));
+        }
+    }
+    let mut out = src.to_string();
+    out.push('\n');
+    let mut sorted: Vec<_> = pragmas.into_iter().collect();
+    sorted.sort();
+    for (w, p) in sorted {
+        writeln!(out, "(pronounced \"{w}\" as \"{p}\")").unwrap();
+    }
+    out
+}
+
+/// Compares the crate's per-stanza prosody verdict with the oracle's on the same end words.
+/// Returns the (valid, invalid) stanza counts.
+fn prosody_agrees(src: &str, dict: &mut oracle::Dict, what: &str) -> (usize, usize) {
+    use syntaxeon_lex::prosody;
+    use syntaxeon_lexicon::lexicon::Lexicon;
+    let lexed = lex(src);
+    let verses = stanzas(&lexed);
+    assert!(
+        lexed.diagnostics.is_empty(),
+        "{:?}\n{src}",
+        lexed.diagnostics
+    );
+    let mut lexicon = Lexicon::pinned().unwrap();
+    let real = prosody::check(&lexed, &verses, &mut lexicon);
+    // Pragma words join the oracle as ordinary pronunciations.
+    for p in &lexed.pragmas {
+        dict.insert(
+            p.word.clone(),
+            vec![p.phones.split(' ').map(str::to_string).collect()],
+        );
+    }
+    let failing_real: Vec<usize> = real.iter().map(|d| d.line).collect();
+    let (mut valid, mut invalid) = (0, 0);
+    let mut failing_oracle = Vec::new();
+    for s in &verses {
+        let words: Vec<&str> = s
+            .verses
+            .iter()
+            .filter(|v| !v.structural)
+            .map(|v| v.end_word.as_deref().unwrap())
+            .collect();
+        if oracle::stanza_ok(dict, &words) {
+            valid += 1;
+        } else {
+            invalid += 1;
+            failing_oracle.push(s.verses[0].line);
+        }
+    }
+    for p in &lexed.pragmas {
+        dict.remove(&p.word);
+    }
+    assert_eq!(failing_real, failing_oracle, "{what}\n{src}");
+    (valid, invalid)
+}
+
+/// Prosody on generated programs: whatever the random end words are (steered or not), the
+/// crate and the oracle agree on every stanza. Valid stanzas are rare here (headers and
+/// numerals end in fixed words), so the poems below carry the positive cases.
+#[test]
+fn rhyme_in_generated_programs_agrees_with_the_oracle() {
+    let mut dict = oracle::load();
+    let base = env_or("SYNTAXEON_FUZZ_SEED", 0x000A_11CE);
+    let mut rng = Rng(base.wrapping_mul(7) | 1);
+    for i in 0..env_or("SYNTAXEON_FUZZ_ITERS", 40) {
+        let src = steer(
+            &unknown_names(&render(&program_for(mix(base, i)))),
+            &dict,
+            &mut rng,
+        );
+        prosody_agrees(&src, &mut dict, &format!("seed {base} program {i}"));
+    }
+}
+
+/// Stanzas written only to rhyme (they need not type-check): mostly free-name endings with a
+/// few fixed ones (numerals, quoted text, headers) and exempt `Otherwise:` / `So be it.`.
+fn poem(rng: &mut Rng) -> String {
+    let name = |rng: &mut Rng| {
+        format!(
+            "the {}",
+            ["pile", "ember", "hero", "bird", "stack", "tally"][rng.below(6)]
+        )
+    };
+    let mut out = String::from("Thus begins the tale of men:\n");
+    for st in 0..=rng.below(3) {
+        if st > 0 {
+            out.push('\n');
+        }
+        for _ in 0..=rng.below(8) {
+            let line = match rng.below(14) {
+                0 => "Proclaim 7.".to_string(),
+                1 => "Speak \"Hello again\".".to_string(),
+                2 => "Proclaim the text of 21.".to_string(),
+                3 => "If the pile is the ember, then:".to_string(),
+                4 => "Do this 3 times:".to_string(),
+                5 => "Otherwise:".to_string(),
+                6 => "So be it.".to_string(),
+                7 => format!("Give back {}.", name(rng)),
+                8 => format!("Let the pile now be {}.", name(rng)),
+                9 => format!(
+                    "Let the hero, a whole number, become the sum of {} and {}.",
+                    name(rng),
+                    name(rng)
+                ),
+                _ => format!("Proclaim the text of {}.", name(rng)),
+            };
+            out.push_str(&unknown_names(&line));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[test]
+fn rhymed_poems_agree_with_the_oracle() {
+    let mut dict = oracle::load();
+    let base = env_or("SYNTAXEON_FUZZ_SEED", 0xB0E7);
+    let iters = usize::try_from(env_or("SYNTAXEON_FUZZ_ITERS", 40)).unwrap();
+    let mut rng = Rng(base.wrapping_mul(11) | 1);
+    let (mut valid, mut invalid) = (0, 0);
+    for i in 0..iters {
+        let src = steer(&poem(&mut rng), &dict, &mut rng);
+        let (v, n) = prosody_agrees(&src, &mut dict, &format!("seed {base} poem {i}"));
+        valid += v;
+        invalid += n;
+    }
+    assert!(
+        valid * 4 >= iters && invalid * 4 >= iters,
+        "unbalanced: {valid} valid / {invalid} invalid"
+    );
+}
+
+/// `fmt` on generated programs whose whitespace is mangled: the result equals the formatting of
+/// the clean text, is stable, and still passes `check`.
+#[test]
+fn fmt_ignores_mangled_whitespace() {
+    use syntaxeon_cli::{Env, run};
+    let env = Env {
+        stdout_tty: false,
+        stderr_tty: false,
+        no_color_env: true,
+    };
+    let fmt = |src: &str| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(
+            &["fmt".into(), "-".into()],
+            &env,
+            &mut src.as_bytes(),
+            &mut out,
+            &mut err,
+        );
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    };
+    let base = env_or("SYNTAXEON_FUZZ_SEED", 0xF0_F0);
+    let mut rng = Rng(base | 1);
+    for i in 0..env_or("SYNTAXEON_FUZZ_ITERS", 40).min(60) {
+        let clean = render(&program_for(mix(base, i)));
+        let mut mangled = String::from("\n\n");
+        for line in clean.lines() {
+            mangled.push_str(line);
+            if line.is_empty() {
+                mangled.push_str(["", "\n", "\n\n"][rng.below(3)]);
+            } else {
+                mangled.push_str(["", "  ", "   "][rng.below(3)]);
+            }
+            mangled.push('\n');
+        }
+        mangled.push_str("\n\n");
+        let (code, once, err) = fmt(&clean);
+        assert_eq!(code, 0, "{err}\n{clean}");
+        let (code, again, _) = fmt(&once);
+        assert_eq!(code, 0);
+        assert_eq!(again, once, "not stable\n{clean}");
+        assert_eq!(fmt(&mangled).1, once, "mangled\n{mangled}");
+    }
+}
+
+/// One stanza of declarations and assignments in random spellings (D1–D3, A1–A3), with
+/// pragma-steered rhymes. Whenever such a program is valid, `fmt` must keep it valid and
+/// equal in meaning, and be stable; some of them must actually be rewritten.
+#[test]
+fn fmt_keeps_rhyming_programs_valid() {
+    use syntaxeon_cli::{Env, run};
+    let env = Env {
+        stdout_tty: false,
+        stderr_tty: false,
+        no_color_env: true,
+    };
+    let exec = |args: &[&str], src: &str| {
+        let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(&argv, &env, &mut src.as_bytes(), &mut out, &mut err);
+        (code, String::from_utf8(out).unwrap())
+    };
+    let meaning = |src: &str| {
+        let (code, ast) = exec(&["ast", "-"], src);
+        assert_eq!(code, 0);
+        ast.lines()
+            .filter(|l| !l.contains("line:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let dict = oracle::load();
+    let base = env_or("SYNTAXEON_FUZZ_SEED", 0xF0_0D);
+    let mut rng = Rng(base | 1);
+    let (mut valid, mut rewritten) = (0_u64, 0_u64);
+    let iters = env_or("SYNTAXEON_FUZZ_ITERS", 40) * 3;
+    for _ in 0..iters {
+        let mut declared: Vec<&str> = Vec::new();
+        let mut text = format!(
+            "Thus begins the tale of {}:\n",
+            ["men", "thumb"][rng.below(2)]
+        );
+        for _ in 0..=(2 * rng.below(2)) {
+            let expr = if declared.is_empty() || rng.below(10) < 2 {
+                ["one", "two", "three", "nine"][rng.below(4)].to_string()
+            } else {
+                format!("the {}", declared[rng.below(declared.len())])
+            };
+            let cap = |s: String| {
+                let mut c = s.chars();
+                c.next()
+                    .map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+            };
+            let line = if declared.is_empty() || (declared.len() < VARS.len() && rng.below(2) == 0)
+            {
+                let v = VARS[declared.len()];
+                declared.push(v);
+                match rng.below(3) {
+                    0 => format!("The {v}, a whole number, shall become {expr}."),
+                    1 => format!("Let the {v}, a whole number, become {expr}."),
+                    _ => cap(format!("{expr} shall the {v}, a whole number, become.")),
+                }
+            } else {
+                let v = declared[rng.below(declared.len())];
+                match rng.below(3) {
+                    0 => format!("The {v} shall now be {expr}."),
+                    1 => format!("Let the {v} now be {expr}."),
+                    _ => cap(format!("{expr} shall the {v} now be.")),
+                }
+            };
+            text.push_str(&line);
+            text.push('\n');
+        }
+        let src = steer(&unknown_names(&text), &dict, &mut rng);
+        if exec(&["check", "-q", "-"], &src).0 != 0 {
+            continue;
+        }
+        valid += 1;
+        let (code, once) = exec(&["fmt", "-"], &src);
+        assert_eq!(code, 0, "{src}");
+        assert_eq!(
+            exec(&["check", "-q", "-"], &once).0,
+            0,
+            "fmt broke the rhyme:\n{src}\n---\n{once}"
+        );
+        assert_eq!(meaning(&once), meaning(&src), "{src}\n---\n{once}");
+        assert_eq!(
+            exec(&["fmt", "-"], &once).1,
+            once,
+            "not stable:\n{src}\n---\n{once}"
+        );
+        rewritten += u64::from(once != src);
+    }
+    assert!(
+        valid * 16 >= iters,
+        "too few valid programs: {valid}/{iters}"
+    );
+    assert!(
+        rewritten * 16 >= valid,
+        "too few rewrites: {rewritten}/{valid}"
+    );
+}
+
+// ---- strings and floats ------------------------------------------------------------------
+//
+// A second, straight-line generator over `Integer`, `Float` and `String` values with the
+// conversions between them, checked against a model of its own. Control flow is covered above.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ty {
+    Int,
+    Float,
+    Text,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Val {
+    Int(i64),
+    Float(f64),
+    Text(String),
+}
+
+#[derive(Clone, Debug)]
+enum X {
+    Lit(Val, String),
+    Var(usize),
+    Neg(Box<X>),
+    Arith(Op, Box<X>, Box<X>),
+    /// `the text of`
+    ToText(Box<X>),
+    /// `the length of`
+    Len(Box<X>),
+    /// `the whole number of`
+    Trunc(Box<X>),
+    /// `the fraction of`
+    Frac(Box<X>),
+}
+
+/// A declared variable: its type and its current value in the model.
+type Slot = (Ty, Option<Val>);
+
+struct Scalars {
+    rng: Rng,
+    vars: Vec<Ty>,
+}
+
+const FLOATS: &[(f64, &str)] = &[
+    (0.5, "0.5"),
+    (1.5, "1.5"),
+    (2.25, "2.25"),
+    (10.0, "10.0"),
+    (0.1, "0.1"),
+    (3.75, "3.75"),
+    (100.5, "100.5"),
+];
+const TEXTS: &[&str] = &["a", "bc", "hello", "Zed", "x y", "", "tale of two"];
+
+impl Scalars {
+    fn expr(&mut self, want: Ty, depth: usize) -> X {
+        let vars: Vec<usize> = (0..self.vars.len())
+            .filter(|i| self.vars[*i] == want)
+            .collect();
+        if depth == 0 || self.rng.chance(25) {
+            if !vars.is_empty() && self.rng.chance(50) {
+                return X::Var(vars[self.rng.below(vars.len())]);
+            }
+            return match want {
+                Ty::Int => {
+                    let n = i64::try_from(self.rng.below(3000)).unwrap();
+                    let n = if self.rng.chance(10) { i64::MAX - n } else { n };
+                    X::Lit(Val::Int(n), n.to_string())
+                }
+                Ty::Float => {
+                    let (f, t) = FLOATS[self.rng.below(FLOATS.len())];
+                    X::Lit(Val::Float(f), t.to_string())
+                }
+                Ty::Text => {
+                    let w = TEXTS[self.rng.below(TEXTS.len())];
+                    X::Lit(Val::Text(w.to_string()), format!("\"{w}\""))
+                }
+            };
+        }
+        let d = depth - 1;
+        let b = |x: X| Box::new(x);
+        match (want, self.rng.below(6)) {
+            (Ty::Text, 0 | 1) => X::Arith(
+                Op::Sum,
+                b(self.expr(Ty::Text, d)),
+                b(self.expr(Ty::Text, d)),
+            ),
+            (Ty::Text, _) => {
+                let from = if self.rng.chance(50) {
+                    Ty::Int
+                } else {
+                    Ty::Float
+                };
+                X::ToText(b(self.expr(from, d)))
+            }
+            (Ty::Int, 0) => X::Len(b(self.expr(Ty::Text, d))),
+            (Ty::Int, 1) => X::Trunc(b(self.expr(Ty::Float, d))),
+            (Ty::Int, 2) => X::Neg(b(self.expr(Ty::Int, d))),
+            (Ty::Int, _) => {
+                let op = [
+                    Op::Sum,
+                    Op::Difference,
+                    Op::Product,
+                    Op::Quotient,
+                    Op::Remainder,
+                ][self.rng.below(5)];
+                X::Arith(op, b(self.expr(Ty::Int, d)), b(self.expr(Ty::Int, d)))
+            }
+            (Ty::Float, 0) => X::Frac(b(self.expr(Ty::Int, d))),
+            (Ty::Float, 1) => X::Neg(b(self.expr(Ty::Float, d))),
+            (Ty::Float, _) => {
+                let op = [Op::Sum, Op::Difference, Op::Product, Op::Quotient][self.rng.below(4)];
+                X::Arith(op, b(self.expr(Ty::Float, d)), b(self.expr(Ty::Float, d)))
+            }
+        }
+    }
+}
+
+fn render_x(x: &X, out: &mut String) {
+    let word = |op: &Op| match op {
+        Op::Sum => "sum",
+        Op::Difference => "difference",
+        Op::Product => "product",
+        Op::Quotient => "quotient",
+        Op::Remainder => "remainder",
+    };
+    match x {
+        X::Lit(_, text) => out.push_str(text),
+        X::Var(i) => write!(out, "the {}", VARS[*i]).unwrap(),
+        X::Neg(a) => {
+            out.push_str("the negation of ");
+            render_x(a, out);
+        }
+        X::Arith(op, a, b) => {
+            write!(out, "the {} of ", word(op)).unwrap();
+            render_x(a, out);
+            out.push_str(" and ");
+            render_x(b, out);
+        }
+        X::ToText(a) => {
+            out.push_str("the text of ");
+            render_x(a, out);
+        }
+        X::Len(a) => {
+            out.push_str("the length of ");
+            render_x(a, out);
+        }
+        X::Trunc(a) => {
+            out.push_str("the whole number of ");
+            render_x(a, out);
+        }
+        X::Frac(a) => {
+            out.push_str("the fraction of ");
+            render_x(a, out);
+        }
+    }
+}
+
+/// Model evaluation; `Err` is the runtime error code.
+fn eval_x(x: &X, env: &[Slot]) -> Result<Val, &'static str> {
+    Ok(match x {
+        X::Lit(v, _) => v.clone(),
+        X::Var(i) => env[*i].1.clone().expect("declared before use"),
+        X::Neg(a) => match eval_x(a, env)? {
+            Val::Int(n) => Val::Int(n.checked_neg().ok_or("SXP-501")?),
+            Val::Float(f) => Val::Float(-f),
+            Val::Text(_) => unreachable!("typed"),
+        },
+        X::Arith(op, a, b) => match (eval_x(a, env)?, eval_x(b, env)?) {
+            (Val::Int(p), Val::Int(q)) => Val::Int(match op {
+                Op::Sum => p.checked_add(q).ok_or("SXP-501")?,
+                Op::Difference => p.checked_sub(q).ok_or("SXP-501")?,
+                Op::Product => p.checked_mul(q).ok_or("SXP-501")?,
+                Op::Quotient | Op::Remainder if q == 0 => return Err("SXP-502"),
+                Op::Quotient => p.checked_div(q).ok_or("SXP-501")?,
+                // `MIN mod -1` is 0 (SEMANTIC_CORE §10), which Rust's checked_rem refuses.
+                Op::Remainder if q == -1 => 0,
+                Op::Remainder => p % q,
+            }),
+            (Val::Float(p), Val::Float(q)) => Val::Float(match op {
+                Op::Sum => p + q,
+                Op::Difference => p - q,
+                Op::Product => p * q,
+                _ => p / q,
+            }),
+            (Val::Text(p), Val::Text(q)) => Val::Text(p + &q),
+            _ => unreachable!("typed"),
+        },
+        X::ToText(a) => Val::Text(match eval_x(a, env)? {
+            Val::Int(n) => n.to_string(),
+            Val::Float(f) => format!("{f:?}"),
+            Val::Text(_) => unreachable!("typed"),
+        }),
+        X::Len(a) => match eval_x(a, env)? {
+            Val::Text(s) => Val::Int(i64::try_from(s.chars().count()).unwrap()),
+            _ => unreachable!("typed"),
+        },
+        X::Trunc(a) => match eval_x(a, env)? {
+            Val::Float(f)
+                if f.is_nan()
+                    || f >= 9_223_372_036_854_775_808.0
+                    || f < -9_223_372_036_854_775_808.0 =>
+            {
+                return Err("SXP-506");
+            }
+            #[allow(clippy::cast_possible_truncation)] // range checked on the line above
+            Val::Float(f) => Val::Int(f.trunc() as i64),
+            _ => unreachable!("typed"),
+        },
+        X::Frac(a) => match eval_x(a, env)? {
+            #[allow(clippy::cast_precision_loss)] // the language rounds the same way
+            Val::Int(n) => Val::Float(n as f64),
+            _ => unreachable!("typed"),
+        },
+    })
+}
+
+/// Program text and the model's `(output, error)`.
+fn scalar_program(seed: u64) -> (String, Outcome) {
+    let mut g = Scalars {
+        rng: Rng(seed | 1),
+        vars: vec![],
+    };
+    let mut env: Vec<Slot> = Vec::new();
+    let mut src = String::from("Thus begins the tale:\n");
+    let mut out = String::new();
+    let mut failed: Option<&'static str> = None;
+    for _ in 0..4 + g.rng.below(14) {
+        let declare = g.vars.len() < VARS.len() && (g.vars.is_empty() || g.rng.chance(55));
+        if declare {
+            let ty = [Ty::Int, Ty::Float, Ty::Text][g.rng.below(3)];
+            let x = g.expr(ty, 3);
+            let note = ["a whole number", "a fraction", "a text"][ty as usize];
+            let mut e = String::new();
+            render_x(&x, &mut e);
+            writeln!(src, "Let the {}, {note}, become {e}.", VARS[g.vars.len()]).unwrap();
+            g.vars.push(ty);
+            env.push((ty, None));
+            if failed.is_none() {
+                match eval_x(&x, &env) {
+                    Ok(v) => env[g.vars.len() - 1].1 = Some(v),
+                    Err(c) => failed = Some(c),
+                }
+            }
+        } else {
+            let ty = [Ty::Int, Ty::Float, Ty::Text][g.rng.below(3)];
+            let x = g.expr(ty, 3);
+            let mut e = String::new();
+            render_x(&x, &mut e);
+            if ty == Ty::Text {
+                writeln!(src, "Proclaim {e}.").unwrap();
+            } else {
+                writeln!(src, "Proclaim the text of {e}.").unwrap();
+            }
+            if failed.is_none() {
+                match eval_x(&x, &env) {
+                    Ok(Val::Text(s)) => writeln!(out, "{s}").unwrap(),
+                    Ok(Val::Int(n)) => writeln!(out, "{n}").unwrap(),
+                    Ok(Val::Float(f)) => writeln!(out, "{f:?}").unwrap(),
+                    Err(c) => failed = Some(c),
+                }
+            }
+        }
+        if failed.is_some() {
+            break;
+        }
+    }
+    (src, (out, failed))
+}
+
+#[test]
+fn scalar_programs_behave_like_the_model() {
+    let base = env_or("SYNTAXEON_FUZZ_SEED", 0x5CA1);
+    let iters = env_or("SYNTAXEON_FUZZ_ITERS", 400);
+    let (mut errors, mut floats, mut texts) = (0, 0, 0);
+    for i in 0..iters {
+        let seed = mix(base, i);
+        let (src, want) = scalar_program(seed);
+        let got = pipeline(&src).unwrap_or_else(|codes| {
+            panic!("seed {seed:#x} rejected {codes:?}\n--- program\n{src}");
+        });
+        assert_eq!(got, want, "seed {seed:#x}\n--- program\n{src}");
+        errors += usize::from(want.1.is_some());
+        floats += usize::from(src.contains("fraction"));
+        texts += usize::from(src.contains("a text"));
+    }
+    let n = usize::try_from(iters).unwrap();
+    assert!(
+        errors * 20 >= n && floats * 4 >= n && texts * 4 >= n,
+        "weak coverage: {errors} errors, {floats} floats, {texts} texts of {n}"
+    );
 }

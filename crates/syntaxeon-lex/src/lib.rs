@@ -5,12 +5,7 @@ pub mod lexer;
 pub mod literary;
 pub mod prosody;
 
-/// Byte range into the source text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-}
+pub use syntaxeon_core::Span;
 
 /// A structured diagnostic; the literary voice is a renderer over this (`spec/PROSODY.md` §8).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,4 +13,6 @@ pub struct Diagnostic {
     pub code: &'static str,
     pub message: String,
     pub line: usize,
+    /// The words the error is about, when it is about part of a line (expressions).
+    pub span: Option<Span>,
 }
